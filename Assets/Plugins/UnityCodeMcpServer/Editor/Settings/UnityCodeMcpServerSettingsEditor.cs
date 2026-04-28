@@ -6,6 +6,7 @@ using System.Reflection;
 using UnityCodeMcpServer.Editor.Installer;
 using UnityCodeMcpServer.Helpers;
 using UnityEditor;
+using UnityEditor.IMGUI.Controls;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -17,8 +18,10 @@ namespace UnityCodeMcpServer.Settings.Editor
     [CustomEditor(typeof(UnityCodeMcpServerSettings))]
     public class UnityCodeMcpServerSettingsEditor : UnityEditor.Editor
     {
+        private const string NoAssembliesAvailableLabel = "(No assemblies available)";
+
         // ── Assembly selector state ───────────────────────────────────────────
-        private int _selectedAssemblyIndex = 0;
+        private readonly AdvancedDropdownState _assemblyDropdownState = new();
         private string[] _availableAssemblyNames;
         private bool _showDefaultAssemblies = true;
         private bool _showAdditionalAssemblies = true;
@@ -77,23 +80,18 @@ namespace UnityCodeMcpServer.Settings.Editor
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField("Add Assembly:", GUILayout.Width(100));
 
-                _selectedAssemblyIndex = EditorGUILayout.Popup(_selectedAssemblyIndex, _availableAssemblyNames);
-
-                if (GUILayout.Button("Add", GUILayout.Width(50)))
+                using (new EditorGUI.DisabledScope(!HasAvailableAssemblies()))
                 {
-                    if (_availableAssemblyNames != null && _availableAssemblyNames.Length > 0 &&
-                        _selectedAssemblyIndex >= 0 && _selectedAssemblyIndex < _availableAssemblyNames.Length)
+                    if (EditorGUILayout.DropdownButton(
+                        new GUIContent(GetAssemblyDropdownLabel()),
+                        FocusType.Keyboard))
                     {
-                        string assemblyName = _availableAssemblyNames[_selectedAssemblyIndex];
-                        if (settings.AddAssembly(assemblyName))
-                        {
-                            UnityCodeMcpServerLogger.Info($"{Protocol.McpProtocol.LogPrefix} Added assembly: {assemblyName}");
-                            RefreshAvailableAssemblies();
-                        }
-                        else
-                        {
-                            UnityCodeMcpServerLogger.Warn($"{Protocol.McpProtocol.LogPrefix} Assembly already added or is a default assembly: {assemblyName}");
-                        }
+                        Rect buttonRect = GUILayoutUtility.GetLastRect();
+                        AssemblySearchableDropdown dropdown = new(
+                            _assemblyDropdownState,
+                            _availableAssemblyNames,
+                            assemblyName => HandleAssemblySelected(assemblyName));
+                        dropdown.Show(buttonRect);
                     }
                 }
 
@@ -290,6 +288,45 @@ namespace UnityCodeMcpServer.Settings.Editor
 
         // ── Assembly selector section ─────────────────────────────────────────
 
+        private bool HandleAssemblySelected(string assemblyName)
+        {
+            if (string.IsNullOrWhiteSpace(assemblyName) || IsPlaceholderAssemblyName(assemblyName))
+            {
+                return false;
+            }
+
+            UnityCodeMcpServerSettings settings = (UnityCodeMcpServerSettings)target;
+            if (settings.AddAssembly(assemblyName))
+            {
+                UnityCodeMcpServerLogger.Info($"{Protocol.McpProtocol.LogPrefix} Added assembly: {assemblyName}");
+                RefreshAvailableAssemblies();
+                Repaint();
+                return true;
+            }
+
+            UnityCodeMcpServerLogger.Warn($"{Protocol.McpProtocol.LogPrefix} Assembly already added or is a default assembly: {assemblyName}");
+            return false;
+        }
+
+        private bool HasAvailableAssemblies()
+        {
+            return _availableAssemblyNames != null &&
+                _availableAssemblyNames.Length > 0 &&
+                !IsPlaceholderAssemblyName(_availableAssemblyNames[0]);
+        }
+
+        private string GetAssemblyDropdownLabel()
+        {
+            return HasAvailableAssemblies()
+                ? "Select Assembly..."
+                : NoAssembliesAvailableLabel;
+        }
+
+        private static bool IsPlaceholderAssemblyName(string assemblyName)
+        {
+            return string.Equals(assemblyName, NoAssembliesAvailableLabel, StringComparison.Ordinal);
+        }
+
         private void RefreshAvailableAssemblies()
         {
             try
@@ -315,16 +352,51 @@ namespace UnityCodeMcpServer.Settings.Editor
 
                 if (_availableAssemblyNames.Length == 0)
                 {
-                    _availableAssemblyNames = new[] { "(No assemblies available)" };
+                    _availableAssemblyNames = new[] { NoAssembliesAvailableLabel };
                 }
-
-                _selectedAssemblyIndex = 0;
             }
             catch (Exception ex)
             {
                 UnityCodeMcpServerLogger.Error($"{Protocol.McpProtocol.LogPrefix} Error refreshing assemblies: {ex.Message}");
                 _availableAssemblyNames = new[] { "(Error loading assemblies)" };
-                _selectedAssemblyIndex = 0;
+            }
+        }
+
+        private sealed class AssemblySearchableDropdown : AdvancedDropdown
+        {
+            private readonly string[] _assemblyNames;
+            private readonly Action<string> _onAssemblySelected;
+
+            public AssemblySearchableDropdown(
+                AdvancedDropdownState state,
+                string[] assemblyNames,
+                Action<string> onAssemblySelected)
+                : base(state)
+            {
+                _assemblyNames = assemblyNames ?? Array.Empty<string>();
+                _onAssemblySelected = onAssemblySelected;
+                minimumSize = new Vector2(260f, 300f);
+            }
+
+            protected override AdvancedDropdownItem BuildRoot()
+            {
+                AdvancedDropdownItem root = new("Assemblies");
+
+                for (int index = 0; index < _assemblyNames.Length; index++)
+                {
+                    root.AddChild(new AdvancedDropdownItem(_assemblyNames[index])
+                    {
+                        id = index,
+                    });
+                }
+
+                return root;
+            }
+
+            protected override void ItemSelected(AdvancedDropdownItem item)
+            {
+                base.ItemSelected(item);
+                _onAssemblySelected?.Invoke(item.name);
             }
         }
     }

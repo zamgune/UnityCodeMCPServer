@@ -1,4 +1,5 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -6,6 +7,7 @@ using NUnit.Framework;
 using UnityCodeMcpServer.Settings;
 using UnityCodeMcpServer.Settings.Editor;
 using UnityEditor;
+using UnityEditor.IMGUI.Controls;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -967,6 +969,88 @@ namespace UnityCodeMcpServer.Tests.EditMode
 
         #endregion
 
+        #region Searchable Assembly Dropdown Tests
+
+        [Test]
+        public void AssemblySearchableDropdown_BuildRoot_ContainsProvidedAssemblies()
+        {
+            object dropdown = CreateAssemblySearchableDropdown(
+                new[] { "Alpha.Assembly", "Beta.Assembly" },
+                _ => { });
+
+            AdvancedDropdownItem root = BuildAssemblyDropdownRoot(dropdown);
+
+            Assert.That(root.name, Is.EqualTo("Assemblies"));
+            Assert.That(root.children.Count, Is.EqualTo(2));
+            Assert.That(root.children.Select(child => child.name), Is.EqualTo(new[] { "Alpha.Assembly", "Beta.Assembly" }));
+        }
+
+        [Test]
+        public void AssemblySearchableDropdown_ItemSelected_InvokesCallbackWithAssemblyName()
+        {
+            string selectedAssemblyName = null;
+            object dropdown = CreateAssemblySearchableDropdown(
+                new[] { "Alpha.Assembly", "Beta.Assembly" },
+                assemblyName => selectedAssemblyName = assemblyName);
+
+            AdvancedDropdownItem root = BuildAssemblyDropdownRoot(dropdown);
+            SelectAssemblyDropdownItem(dropdown, root.children.ElementAt(1));
+
+            Assert.That(selectedAssemblyName, Is.EqualTo("Beta.Assembly"));
+        }
+
+        [Test]
+        public void HandleAssemblySelected_AddsAssemblyAndRefreshesAvailableAssemblies()
+        {
+            UnityCodeMcpServerSettings settings = ScriptableObject.CreateInstance<UnityCodeMcpServerSettings>();
+            UnityCodeMcpServerSettingsEditor inspector = null;
+
+            try
+            {
+                string assemblyName = AppDomain.CurrentDomain.GetAssemblies()
+                    .Select(assembly => assembly.GetName().Name)
+                    .FirstOrDefault(name =>
+                        !string.IsNullOrWhiteSpace(name) &&
+                        !UnityCodeMcpServerSettings.DefaultAssemblyNames.Contains(name));
+
+                if (assemblyName == null)
+                {
+                    Assert.Ignore("No non-default assemblies are available in the current AppDomain.");
+                }
+
+                inspector = (UnityCodeMcpServerSettingsEditor)UnityEditor.Editor.CreateEditor(
+                    settings,
+                    typeof(UnityCodeMcpServerSettingsEditor));
+
+                MethodInfo handleSelectionMethod = typeof(UnityCodeMcpServerSettingsEditor)
+                    .GetMethod("HandleAssemblySelected", BindingFlags.Instance | BindingFlags.NonPublic);
+
+                Assert.That(handleSelectionMethod, Is.Not.Null);
+
+                bool wasAdded = (bool)handleSelectionMethod.Invoke(inspector, new object[] { assemblyName });
+
+                Assert.That(wasAdded, Is.True);
+                Assert.That(settings.AdditionalAssemblyNames, Contains.Item(assemblyName));
+
+                string[] availableAssemblies = (string[])typeof(UnityCodeMcpServerSettingsEditor)
+                    .GetField("_availableAssemblyNames", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(inspector);
+
+                Assert.That(availableAssemblies, Does.Not.Contain(assemblyName));
+            }
+            finally
+            {
+                if (inspector != null)
+                {
+                    UnityEngine.Object.DestroyImmediate(inspector);
+                }
+
+                ScriptableObject.DestroyImmediate(settings);
+            }
+        }
+
+        #endregion
+
         #region OnInspectorGUI Persistence Tests
 
         /// <summary>
@@ -1014,7 +1098,7 @@ namespace UnityCodeMcpServer.Tests.EditMode
             yield return null;
 
             window.Close();
-            Object.DestroyImmediate(inspector);
+            UnityEngine.Object.DestroyImmediate(inspector);
 
             // Assert: the .asset file on disk must now contain the updated port
             string diskContent = File.ReadAllText(TestSettingsAssetPath);
@@ -1050,6 +1134,40 @@ namespace UnityCodeMcpServer.Tests.EditMode
                 // If it's an asset, Unity manages it; if not, it will be GC'd
                 instanceField.SetValue(null, null);
             }
+        }
+
+        private static object CreateAssemblySearchableDropdown(string[] assemblyNames, Action<string> onSelected)
+        {
+            Type dropdownType = typeof(UnityCodeMcpServerSettingsEditor)
+                .GetNestedType("AssemblySearchableDropdown", BindingFlags.NonPublic);
+
+            Assert.That(dropdownType, Is.Not.Null, "Expected searchable dropdown type to exist.");
+            Assert.That(typeof(AdvancedDropdown).IsAssignableFrom(dropdownType), Is.True);
+
+            return Activator.CreateInstance(
+                dropdownType,
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                binder: null,
+                args: new object[] { new AdvancedDropdownState(), assemblyNames, onSelected },
+                culture: null);
+        }
+
+        private static AdvancedDropdownItem BuildAssemblyDropdownRoot(object dropdown)
+        {
+            MethodInfo buildRootMethod = dropdown.GetType()
+                .GetMethod("BuildRoot", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(buildRootMethod, Is.Not.Null);
+            return (AdvancedDropdownItem)buildRootMethod.Invoke(dropdown, null);
+        }
+
+        private static void SelectAssemblyDropdownItem(object dropdown, AdvancedDropdownItem item)
+        {
+            MethodInfo itemSelectedMethod = dropdown.GetType()
+                .GetMethod("ItemSelected", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(itemSelectedMethod, Is.Not.Null);
+            itemSelectedMethod.Invoke(dropdown, new object[] { item });
         }
 
         #endregion
