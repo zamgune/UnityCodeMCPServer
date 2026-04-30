@@ -23,6 +23,16 @@ Agent guidance for contributors working in this repository.
 - Keep existing style and naming conventions. In Unity C# code, use snake_case for private fields.
 - Prefer latest supported Unity APIs already used by the repo.
 
+## Available Unity Tools
+
+- `execute_csharp_script_in_unity_editor` to run C# scripts in the editor.
+- `run_unity_tests` to run Unity tests. Use this tools instead of command-line test runs for Unity-related work.
+- `read_unity_console_logs` to read Unity console logs for compile errors.
+
+### Additional Unity Tools
+
+- `play_unity_game` to start Play mode in the Unity editor for testing runtime behavior. You must use `enter_play_mode` before this and `exit_play_mode` after to return to edit mode.
+
 ## Unity Workflow
 
 - Before relying on Unity editor tooling, check for compilation problems in Unity logs and fix them first.

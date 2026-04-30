@@ -16,7 +16,6 @@ namespace UnityCodeMcpServer.Editor.Installer
         {
             "src/unity_code_mcp_stdio/__init__.py",
             "src/unity_code_mcp_stdio/unity_code_mcp_bridge_stdio.py",
-            "src/unity_code_mcp_stdio/unity_code_mcp_bridge_stdio_over_http.py",
             "pyproject.toml",
             "uv.lock"
         };
