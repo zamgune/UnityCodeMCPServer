@@ -4,7 +4,7 @@ using System.Reflection;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
-using UnityCodeMcpServer.Servers.StreamableHttp;
+using UnityCodeMcpServer.HttpServer;
 
 namespace UnityCodeMcpServer.Tests.EditMode
 {

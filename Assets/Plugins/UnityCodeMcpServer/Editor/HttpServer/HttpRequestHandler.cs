@@ -9,7 +9,7 @@ using UnityCodeMcpServer.Handlers;
 using UnityCodeMcpServer.Helpers;
 using UnityCodeMcpServer.Protocol;
 
-namespace UnityCodeMcpServer.Servers.StreamableHttp
+namespace UnityCodeMcpServer.HttpServer
 {
     /// <summary>
     /// Result of request validation

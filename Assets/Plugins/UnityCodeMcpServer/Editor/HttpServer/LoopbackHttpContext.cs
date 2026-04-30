@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 
-namespace UnityCodeMcpServer.Servers.StreamableHttp
+namespace UnityCodeMcpServer.HttpServer
 {
     public sealed class LoopbackHttpRequest
     {

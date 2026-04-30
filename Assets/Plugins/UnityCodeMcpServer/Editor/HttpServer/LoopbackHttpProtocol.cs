@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 
-namespace UnityCodeMcpServer.Servers.StreamableHttp
+namespace UnityCodeMcpServer.HttpServer
 {
     public static class LoopbackHttpProtocol
     {

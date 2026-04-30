@@ -1,5 +1,5 @@
 ﻿using System;
-using UnityCodeMcpServer.Servers.StreamableHttp;
+using UnityCodeMcpServer.HttpServer;
 
 namespace UnityCodeMcpServer.Settings
 {

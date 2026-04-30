@@ -15,7 +15,7 @@ using UnityCodeMcpServer.Settings;
 using UnityEditor;
 using UnityEngine;
 
-namespace UnityCodeMcpServer.Servers.StreamableHttp
+namespace UnityCodeMcpServer.HttpServer
 {
     /// <summary>
     /// Streamable HTTP Server that handles MCP protocol connections per specification 2025-03-26.
