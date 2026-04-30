@@ -410,7 +410,7 @@ namespace UnityCodeMcpServer.Servers.Tcp
             string pathToStdio = System.IO.Path.GetFullPath("Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~").Replace("\\", "/");
 
             string template = $@"{{
-  ""servers"": {{
+  ""mcpServers"": {{
     ""unity-code-mcp-stdio"": {{
       ""command"": ""uv"",
       ""args"": [
