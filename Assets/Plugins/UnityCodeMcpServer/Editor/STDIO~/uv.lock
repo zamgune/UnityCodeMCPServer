@@ -850,7 +850,7 @@ wheels = [
 
 [[package]]
 name = "unity-code-mcp-stdio"
-version = "0.0.4"
+version = "0.4.27rc0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

@@ -73,7 +73,7 @@ def build_server_parameters(bridge_dir: Path) -> StdioServerParameters:
             "run",
             "--directory",
             str(bridge_dir),
-            "unity-code-mcp-stdio-over-http",
+            "unity-code-mcp-stdio",
         ],
     )
 

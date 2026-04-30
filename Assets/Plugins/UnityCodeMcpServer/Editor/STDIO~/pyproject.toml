@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unity-code-mcp-stdio"
-version = "0.0.4"
+version = "0.4.27-preview"
 description = "MCP STDIO Bridge for Unity Code MCP Server - a powerful MCP server for the Unity Editor that gives AI Agents ability to perform any action using Unity Editor API. This includes scripts, scenes, prefabs and assets manipulation, configuration changes, and more."
 license = "MIT"
 requires-python = ">=3.10"
@@ -27,7 +27,6 @@ dependencies = [
 
 [project.scripts]
 unity-code-mcp-stdio = "unity_code_mcp_stdio:main"
-unity-code-mcp-stdio-over-http = "unity_code_mcp_stdio.unity_code_mcp_bridge_stdio_over_http:main"
 
 [project.optional-dependencies]
 dev = [

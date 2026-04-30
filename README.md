@@ -113,7 +113,7 @@ You are responsible for securing your environment and for any changes or data lo
 ### STDIO Transport
 
 ```
-┌─────────────┐     STDIO      ┌─────────────────┐      TCP      ┌────────────────────────────┐
+┌─────────────┐     STDIO      ┌─────────────────┐   HTTP / SSE  ┌────────────────────────────┐
 │  MCP Client │ ◄────────────► │  STDIO Bridge   │ ◄───────────► │   Unity Code MCP Server    │
 │  (AI Agent) │                │ (Python script) │               │       (Unity Editor)       │
 └─────────────┘                └─────────────────┘               └────────────────────────────┘
@@ -178,6 +178,8 @@ https://github.com/Signal-Loop/UnityCodeMCPServer.git?path=Assets/Plugins/UnityC
 #### STDIO
 
 Example configuration (using `uv` to run the bridge):
+
+The `unity-code-mcp-stdio` bridge now forwards STDIO traffic to Unity's Streamable HTTP endpoint and reads the configured `HttpPort` from project settings automatically.
 
 ```json
 {

@@ -1,34 +1,36 @@
 """
-Unity Code MCP STDIO Bridge
+Unity Code MCP STDIO Bridge.
 
-Bridges MCP protocol over STDIO to Unity TCP Server.
-Uses a custom Windows-compatible stdio transport since asyncio stdin
-reading doesn't work properly with Windows pipes.
+Bridges MCP protocol over STDIO to Unity's Streamable HTTP endpoint.
+Each Unity interaction is sent as a fresh HTTP POST to Unity's loopback-only
+HTTP endpoint.
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import itertools
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import struct
 import sys
 import time
 from typing import Any, Protocol
+from urllib import error, request
 
 import anyio
 from anyio import create_memory_object_stream, create_task_group
-from mcp.server import Server
 from mcp import types
-from mcp.types import JSONRPCMessage
+from mcp.server import Server
 from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage
 from pydantic import AnyUrl
 
 # Configure logging to file only (STDIO protocol uses stdout for messages)
-# Redirect stderr to devnull to prevent any output that could corrupt JSON-RPC
+# Redirect stderr to devnull to prevent any output that could corrupt JSON-RPC.
 sys.stderr = open(os.devnull, "w")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +55,14 @@ formatter = logging.Formatter(
 )
 
 _REQUEST_TRACE_SEQUENCE = itertools.count(1)
+
+DEFAULT_HTTP_PORT: int = 3001
+HTTP_PROTOCOL_VERSION = "2025-03-26"
+UNITY_HTTP_HOST: str = "127.0.0.1"
+
+# Backward-compatible aliases for callers that still reference the legacy names.
+DEFAULT_PORT = DEFAULT_HTTP_PORT
+UNITY_HOST = UNITY_HTTP_HOST
 
 
 class FlushingHandler(RotatingFileHandler):
@@ -91,12 +101,12 @@ def _configure_logger() -> None:
     logger.addHandler(_build_rotating_handler(log_file_path))
 
 
-def _describe_request(request: dict[str, Any]) -> str:
+def _describe_request(request_payload: dict[str, Any]) -> str:
     """Summarize a JSON-RPC request for diagnostic logging."""
-    params = request.get("params")
+    params = request_payload.get("params")
     fragments = [
-        f"id={request.get('id', 'unknown')}",
-        f"method={request.get('method', 'unknown')}",
+        f"id={request_payload.get('id', 'unknown')}",
+        f"method={request_payload.get('method', 'unknown')}",
     ]
 
     if isinstance(params, dict):
@@ -120,11 +130,12 @@ def _describe_response(response: dict[str, Any]) -> str:
     """Summarize a JSON-RPC response for diagnostic logging."""
     fragments = [f"id={response.get('id', 'unknown')}"]
 
-    error = response.get("error")
-    if isinstance(error, dict):
-        fragments.append(f"error_code={error.get('code', 'unknown')}")
+    error_payload = response.get("error")
+    if isinstance(error_payload, dict):
+        fragments.append(f"error_code={error_payload.get('code', 'unknown')}")
         fragments.append(
-            f"error_message={_truncate_for_log(error.get('message', 'Unknown error'))}"
+            "error_message="
+            + _truncate_for_log(error_payload.get("message", "Unknown error"))
         )
         return " ".join(fragments)
 
@@ -152,9 +163,6 @@ _configure_logger()
 # Settings discovery
 # ---------------------------------------------------------------------------
 
-DEFAULT_PORT: int = 21088
-"""Fallback TCP port used when the settings file cannot be found or read."""
-
 # Fixed path to the settings asset: this script lives at
 #   <project>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/src/unity_code_mcp_stdio/
 # The settings asset is always at
@@ -166,100 +174,59 @@ _SETTINGS_FILE: Path = (
 """Absolute path to the Unity settings asset derived from this module's location."""
 
 
-def read_port_from_settings(settings_file: Path) -> int | None:
-    """Parse the TCP port from a Unity settings asset file.
-
-    Looks for a YAML-style line of the form ``StdioPort: <number>``.
-
-    Args:
-        settings_file: Path to the ``UnityCodeMcpServerSettings.asset`` file.
-
-    Returns:
-        Port number, or ``None`` if the file cannot be read or parsed.
-    """
+def read_http_port_from_settings(settings_file: Path) -> int | None:
+    """Parse the HTTP port from the Unity settings asset."""
     try:
         content = settings_file.read_text(encoding="utf-8")
     except OSError as exc:
-        logger.warning(f"Could not read settings file '{settings_file}': {exc}")
+        logger.warning("Could not read settings file '%s': %s", settings_file, exc)
         return None
 
     for line in content.splitlines():
         stripped = line.strip()
-        if stripped.startswith("StdioPort:"):
+        if stripped.startswith("HttpPort:"):
             _, _, raw = stripped.partition(":")
             try:
                 return int(raw.strip())
             except ValueError:
-                logger.warning(f"Invalid port value in settings: '{stripped}'")
+                logger.warning("Invalid HTTP port value in settings: '%s'", stripped)
                 return None
 
-    logger.warning(f"'StdioPort' key not found in settings file: {settings_file}")
+    logger.warning("'HttpPort' key not found in settings file: %s", settings_file)
     return None
 
 
-def get_stdio_port(_settings_file: Path | None = None) -> int:
-    """Resolve the TCP port from Unity project settings.
-
-    Reads ``StdioPort`` from the settings asset at the fixed path
-    :data:`_SETTINGS_FILE`. Falls back to :data:`DEFAULT_PORT` if the file
-    is absent or the port cannot be parsed.
-
-    This function is safe to call on every request: file reads are small and
-    cheap, and calling it repeatedly allows the port to reflect runtime
-    changes made inside the Unity Editor.
-
-    Args:
-        _settings_file: Override the settings file path. Intended for testing
-            only; production code should rely on the default fixed path.
-
-    Returns:
-        TCP port number.
-    """
+def get_http_port(_settings_file: Path | None = None) -> int:
+    """Resolve the HTTP port from Unity project settings."""
     settings_file = _SETTINGS_FILE if _settings_file is None else _settings_file
     if not settings_file.is_file():
         logger.info(
-            f"Settings file not found at '{settings_file}'. "
-            f"Using default port {DEFAULT_PORT}."
+            "Settings file not found at '%s'. Using default HTTP port %s.",
+            settings_file,
+            DEFAULT_HTTP_PORT,
         )
-        return DEFAULT_PORT
+        return DEFAULT_HTTP_PORT
 
-    port = read_port_from_settings(settings_file)
+    port = read_http_port_from_settings(settings_file)
     if port is None:
         logger.info(
-            f"Could not read port from '{settings_file}'. "
-            f"Using default port {DEFAULT_PORT}."
+            "Could not read HTTP port from '%s'. Using default HTTP port %s.",
+            settings_file,
+            DEFAULT_HTTP_PORT,
         )
-        return DEFAULT_PORT
+        return DEFAULT_HTTP_PORT
 
-    logger.debug(f"Using port {port} from '{settings_file}'.")
+    logger.debug("Using HTTP port %s from '%s'.", port, settings_file)
     return port
 
 
-# ---------------------------------------------------------------------------
-# TCP client
-# ---------------------------------------------------------------------------
+# Backward-compatible function aliases for the old TCP-oriented module surface.
+read_port_from_settings = read_http_port_from_settings
+get_stdio_port = get_http_port
 
 
-UNITY_HOST: str = "localhost"
-"""Default Unity TCP Server host. Unity never listens on remote interfaces."""
-
-
-class UnityRequestTimeoutError(asyncio.TimeoutError):
-    """Raised when a Unity request phase exceeds the configured timeout."""
-
-    def __init__(self, phase: str):
-        super().__init__(phase)
-        self.phase = phase
-
-
-class UnityTcpClient:
-    """TCP client that connects to the Unity MCP Server."""
-
-    HEALTH_PROBE_TIMEOUT = 5.0
-    """Seconds to wait for a ping response when verifying a new connection."""
-
-    CONNECT_TIMEOUT = 5.0
-    """Seconds to wait for a single TCP connect attempt on the hot path."""
+class UnityHttpClient:
+    """Stateless HTTP client for the Unity MCP endpoint."""
 
     def __init__(
         self,
@@ -276,60 +243,43 @@ class UnityTcpClient:
         self.retry_count = retry_count
         self._port_resolver = port_resolver
         self.request_timeout = request_timeout
-        self.reader: asyncio.StreamReader | None = None
-        self.writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
-        self._connection_verified = False
-        self._connected_at: float | None = None
-        self._last_request_completed_at: float | None = None
 
     @staticmethod
     def _remaining_time(deadline: float) -> float:
-        """Return the remaining wall-clock time for the active request."""
         return max(0.0, deadline - time.perf_counter())
 
-    @classmethod
-    def _should_retry(cls, attempt: int, retry_count: int, deadline: float) -> bool:
-        """Return whether another bounded recovery attempt is still allowed."""
-        return attempt < retry_count and cls._remaining_time(deadline) > 0
+    @staticmethod
+    def _build_error(
+        request_payload: dict[str, Any], code: int, message: str
+    ) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_payload.get("id"),
+            "error": {"code": code, "message": message},
+        }
 
     @staticmethod
     def _build_retryable_error_message(last_failure: str) -> str:
-        """Build an actionable exhaustion error for MCP clients and agents."""
         return (
             "Unity was unavailable long enough that the bridge stopped retrying. "
             f"Last observed failure: {last_failure}. {RETRY_GUIDANCE}"
         )
 
-    async def _sleep_before_retry(
-        self,
-        *,
-        trace_id: str,
-        request_summary: str,
-        attempt: int,
-        deadline: float,
-        reason: str,
-    ) -> None:
-        """Pause briefly before the next retry without exceeding the request deadline."""
-        if self.retry_time <= 0:
-            return
+    def _endpoint_url(self) -> str:
+        return f"http://{self.host}:{self.port}/mcp/"
 
-        delay_seconds = min(self.retry_time, self._remaining_time(deadline))
-        if delay_seconds <= 0:
-            return
+    def _build_headers(self) -> dict[str, str]:
+        return {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": HTTP_PROTOCOL_VERSION,
+        }
 
-        logger.info(
-            "trace=%s retrying Unity request attempt=%s reason=%s sleep_s=%.3f %s",
-            trace_id,
-            attempt,
-            reason,
-            delay_seconds,
-            request_summary,
-        )
-        await asyncio.sleep(delay_seconds)
+    async def disconnect(self, reason: str = "manual") -> None:
+        logger.info("HTTP bridge reset reason=%s", reason)
 
     async def _refresh_port(self, trace_id: str, request_summary: str) -> None:
-        """Reconnect when Unity settings change the TCP port."""
         if self._port_resolver is None:
             return
 
@@ -338,411 +288,232 @@ class UnityTcpClient:
             return
 
         logger.info(
-            "trace=%s %s port changed from %s to %s; reconnecting",
+            "trace=%s %s HTTP port changed from %s to %s",
             trace_id,
             request_summary,
             self.port,
             current_port,
         )
-        await self.disconnect(reason="port-change")
         self.port = current_port
 
-    async def _open_connection_for_request(
+    async def _sleep_before_retry(
         self,
         *,
         trace_id: str,
         request_summary: str,
-        deadline: float,
-    ) -> bool:
-        """Open one TCP connection attempt without exceeding the request deadline."""
-        timeout_seconds = min(self.CONNECT_TIMEOUT, self._remaining_time(deadline))
-        if timeout_seconds <= 0:
-            return False
+        attempt: int,
+        reason: str,
+    ) -> None:
+        if self.retry_time <= 0:
+            return
 
-        try:
-            logger.info(
-                "trace=%s Connecting to Unity at %s:%s timeout_s=%.3f %s",
-                trace_id,
-                self.host,
-                self.port,
-                timeout_seconds,
-                request_summary,
-            )
-            self.reader, self.writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port),
-                timeout=timeout_seconds,
-            )
-            self._connection_verified = False
-            self._connected_at = time.perf_counter()
-            self._last_request_completed_at = None
-            logger.info(
-                "trace=%s Connected to Unity at %s:%s %s",
-                trace_id,
-                self.host,
-                self.port,
-                request_summary,
-            )
-            return True
-        except (ConnectionRefusedError, OSError, asyncio.TimeoutError) as e:
-            logger.warning(
-                "trace=%s Unity connect failed host=%s port=%s error_type=%s error=%s %s",
-                trace_id,
-                self.host,
-                self.port,
-                type(e).__name__,
-                e,
-                request_summary,
-            )
-            self.reader = None
-            self.writer = None
-            self._connection_verified = False
-            self._connected_at = None
-            self._last_request_completed_at = None
-            return False
-
-    async def _await_request_phase(
-        self,
-        awaitable,
-        *,
-        trace_id: str,
-        request_summary: str,
-        phase: str,
-        started_at: float,
-        timeout_seconds: float,
-    ):
-        """Await one request phase with a terminal timeout."""
-        if timeout_seconds <= 0:
-            raise UnityRequestTimeoutError(phase)
-
-        try:
-            return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
-        except asyncio.TimeoutError as exc:
-            duration_ms = round((time.perf_counter() - started_at) * 1000)
-            logger.warning(
-                "trace=%s Unity request timeout %s phase=%s duration_ms=%s timeout_s=%s",
-                trace_id,
-                request_summary,
-                phase,
-                duration_ms,
-                timeout_seconds,
-            )
-            raise UnityRequestTimeoutError(phase) from exc
-
-    async def disconnect(self, reason: str = "requested"):
-        """Disconnect from Unity TCP Server."""
-        writer = self.writer
-        self.writer = None
-        self.reader = None
-        self._connection_verified = False
-        self._connected_at = None
-        self._last_request_completed_at = None
-
-        if writer:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-        logger.info("Disconnected from Unity reason=%s", reason)
-
-    async def _health_probe(self, trace_id: str, deadline: float) -> bool:
-        """Send a ``ping`` to verify Unity is actually responsive.
-
-        The Unity TCP server handles ``ping`` without switching to the main
-        thread, so this succeeds even during editor initialization.  A short
-        timeout (5 s) means we detect a dead-but-listening server quickly
-        instead of waiting the full 30 s request timeout.
-        """
-        probe = {
-            "jsonrpc": "2.0",
-            "id": f"health_{trace_id}",
-            "method": "ping",
-            "params": {},
-        }
-        try:
-            if self.writer is None or self.reader is None:
-                return False
-
-            writer = self.writer
-            reader = self.reader
-            message = json.dumps(probe).encode("utf-8")
-            length_prefix = struct.pack(">I", len(message))
-            writer.write(length_prefix + message)
-            probe_timeout_seconds = min(
-                self.HEALTH_PROBE_TIMEOUT, self._remaining_time(deadline)
-            )
-            if probe_timeout_seconds <= 0:
-                return False
-
-            await asyncio.wait_for(writer.drain(), timeout=probe_timeout_seconds)
-
-            length_data = await asyncio.wait_for(
-                reader.readexactly(4), timeout=probe_timeout_seconds
-            )
-            response_length = struct.unpack(">I", length_data)[0]
-            await asyncio.wait_for(
-                reader.readexactly(response_length),
-                timeout=probe_timeout_seconds,
-            )
-
-            logger.info("trace=%s Health probe passed", trace_id)
-            return True
-        except Exception as e:
-            logger.warning(
-                "trace=%s Health probe failed error_type=%s error=%s",
-                trace_id,
-                type(e).__name__,
-                e,
-            )
-            return False
+        logger.info(
+            "trace=%s retrying Unity HTTP request attempt=%s reason=%s sleep_s=%.3f %s",
+            trace_id,
+            attempt,
+            reason,
+            self.retry_time,
+            request_summary,
+        )
+        await asyncio.sleep(self.retry_time)
 
     @staticmethod
-    def _build_error(
-        request: dict[str, Any], code: int, message: str
-    ) -> dict[str, Any]:
-        """Build a JSON-RPC error response."""
-        return {
-            "jsonrpc": "2.0",
-            "id": request.get("id"),
-            "error": {"code": code, "message": message},
-        }
+    def _parse_sse_response(body: bytes) -> dict[str, Any] | None:
+        event_name = "message"
+        data_lines: list[str] = []
 
-    async def send_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Send a JSON-RPC request to Unity and return the response.
+        for raw_line in body.decode("utf-8").splitlines():
+            if not raw_line:
+                if data_lines and event_name == "message":
+                    return json.loads("\n".join(data_lines))
+                event_name = "message"
+                data_lines = []
+                continue
 
-        The port is resolved fresh before every attempt so runtime settings
-        changes and transient Unity reload windows can be recovered in-place.
+            if raw_line.startswith(":"):
+                continue
 
-        The request is bounded by a single wall-clock deadline so the bridge
-        either returns a successful result or an actionable error without
-        leaving the caller stuck waiting forever.
+            field, _, value = raw_line.partition(":")
+            value = value.lstrip(" ")
+            if field == "event":
+                event_name = value or "message"
+            elif field == "data":
+                data_lines.append(value)
 
-        Retry budget:
-            - Connect failures and send failures consume the retry counter.
-            - Health probe failures do NOT consume the retry counter; they are
-              bounded only by the overall deadline.  This prevents the common
-              scenario where Unity restarts after domain reload but its main
-              thread is temporarily busy: the bridge keeps probing until the
-              server responds rather than exhausting its retry budget.
-        """
+        if data_lines and event_name == "message":
+            return json.loads("\n".join(data_lines))
+
+        return None
+
+    async def _send_transport_request(
+        self,
+        request_payload: dict[str, Any],
+        *,
+        trace_id: str,
+        request_summary: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any] | None:
+        if timeout_seconds <= 0:
+            raise TimeoutError("request-timeout-exceeded")
+
+        body = json.dumps(request_payload).encode("utf-8")
+        headers = self._build_headers()
+
+        def do_request() -> tuple[int, str, bytes]:
+            http_request = request.Request(
+                self._endpoint_url(),
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with request.urlopen(
+                    http_request, timeout=timeout_seconds
+                ) as http_response:
+                    return (
+                        http_response.status,
+                        http_response.headers.get("Content-Type", ""),
+                        http_response.read(),
+                    )
+            except error.HTTPError as exc:
+                response_body = exc.read()
+                content_type = exc.headers.get("Content-Type", "")
+                if response_body and content_type.startswith("application/json"):
+                    parsed = json.loads(response_body.decode("utf-8"))
+                    return exc.code, content_type, json.dumps(parsed).encode("utf-8")
+                raise
+
+        status_code, content_type, response_body = await anyio.to_thread.run_sync(  # type: ignore[attr-defined]
+            do_request
+        )
+
+        logger.debug(
+            "trace=%s Unity HTTP response status=%s content_type=%s bytes=%s %s",
+            trace_id,
+            status_code,
+            content_type,
+            len(response_body),
+            request_summary,
+        )
+
+        if status_code == 202:
+            return None
+
+        if not response_body:
+            raise RuntimeError(
+                f"Unity HTTP response had no body (status {status_code})"
+            )
+
+        if content_type.startswith("application/json"):
+            return json.loads(response_body.decode("utf-8"))
+
+        if content_type.startswith("text/event-stream"):
+            parsed = self._parse_sse_response(response_body)
+            if parsed is None:
+                raise RuntimeError("Unity SSE response did not contain an MCP message")
+            return parsed
+
+        raise RuntimeError(
+            f"Unsupported Unity HTTP content type '{content_type or '<none>'}'"
+        )
+
+    async def send_request(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         trace_id = _next_request_trace_id()
-        request_summary = _describe_request(request)
+        request_summary = _describe_request(request_payload)
         started_at = time.perf_counter()
 
         logger.info(
-            "trace=%s Unity request started %s connection_state=%s",
+            "trace=%s Unity HTTP request started %s endpoint=%s",
             trace_id,
             request_summary,
-            "connected" if self.writer and self.reader else "disconnected",
+            self._endpoint_url(),
         )
 
         async with self._lock:
-            deadline = started_at + self.request_timeout
-            last_failure = "Unity did not become ready before the retry window expired"
+            last_failure = (
+                "Unity HTTP endpoint did not become ready before the retry window expired"
+            )
             attempt = 0
 
-            while self._remaining_time(deadline) > 0:
-                await self._refresh_port(trace_id, request_summary)
-
-                # --- Phase 1: Ensure TCP connection (consumes attempt) ---
-                if not self.writer or not self.reader:
-                    attempt += 1
-                    if attempt > self.retry_count:
-                        break
-
-                    logger.info(
-                        "trace=%s Unity request attempt=%s/%s remaining_ms=%s %s",
-                        trace_id,
-                        attempt,
-                        self.retry_count,
-                        round(self._remaining_time(deadline) * 1000),
-                        request_summary,
-                    )
-
-                    connected = await self._open_connection_for_request(
-                        trace_id=trace_id,
-                        request_summary=request_summary,
-                        deadline=deadline,
-                    )
-                    if not connected:
-                        last_failure = "Unity TCP server was not accepting connections"
-                        if not self._should_retry(attempt, self.retry_count, deadline):
-                            break
-                        await self._sleep_before_retry(
-                            trace_id=trace_id,
-                            request_summary=request_summary,
-                            attempt=attempt,
-                            deadline=deadline,
-                            reason="connect-failed",
-                        )
-                        continue
-
-                # --- Phase 2: Health probe (does NOT consume attempt) ---
-                if not self._connection_verified:
-                    if not await self._health_probe(trace_id, deadline):
-                        last_failure = (
-                            "Unity TCP server accepted the connection but "
-                            "did not respond to ping"
-                        )
-                        await self.disconnect(reason="health-probe-failed")
-                        # Undo the attempt increment from Phase 1 so that
-                        # transient main-thread-busy windows (domain reload)
-                        # don't exhaust the retry budget.
-                        attempt -= 1
-                        if self._remaining_time(deadline) <= 0:
-                            break
-                        delay = min(self.retry_time, self._remaining_time(deadline))
-                        if delay > 0:
-                            logger.info(
-                                "trace=%s waiting for Unity server "
-                                "reason=health-probe-failed sleep_s=%.3f %s",
-                                trace_id,
-                                delay,
-                                request_summary,
-                            )
-                            await asyncio.sleep(delay)
-                        continue
-
-                    self._connection_verified = True
-
-                # --- Phase 3: Send the request ---
+            while attempt < self.retry_count:
                 try:
-                    if self.writer is None or self.reader is None:
-                        raise ConnectionResetError("Unity socket is not available")
+                    await self._refresh_port(trace_id, request_summary)
 
-                    writer = self.writer
-                    reader = self.reader
-                    message = json.dumps(request).encode("utf-8")
-                    length_prefix = struct.pack(">I", len(message))
-                    writer.write(length_prefix + message)
-                    await self._await_request_phase(
-                        writer.drain(),
+                    response = await self._send_transport_request(
+                        request_payload,
                         trace_id=trace_id,
                         request_summary=request_summary,
-                        phase="write",
-                        started_at=started_at,
-                        timeout_seconds=self._remaining_time(deadline),
+                        timeout_seconds=self.request_timeout,
                     )
+                    if response is None:
+                        response = {
+                            "jsonrpc": "2.0",
+                            "id": request_payload.get("id"),
+                            "result": {},
+                        }
 
-                    logger.debug(
-                        "trace=%s Sent Unity request bytes=%s %s",
-                        trace_id,
-                        len(message),
-                        request_summary,
-                    )
-
-                    length_data = await self._await_request_phase(
-                        reader.readexactly(4),
-                        trace_id=trace_id,
-                        request_summary=request_summary,
-                        phase="response-length",
-                        started_at=started_at,
-                        timeout_seconds=self._remaining_time(deadline),
-                    )
-                    response_length = struct.unpack(">I", length_data)[0]
-                    response_data = await self._await_request_phase(
-                        reader.readexactly(response_length),
-                        trace_id=trace_id,
-                        request_summary=request_summary,
-                        phase="response-body",
-                        started_at=started_at,
-                        timeout_seconds=self._remaining_time(deadline),
-                    )
-                    response = json.loads(response_data.decode("utf-8"))
-
-                    self._last_request_completed_at = time.perf_counter()
                     duration_ms = round((time.perf_counter() - started_at) * 1000)
-                    response_summary = _describe_response(response)
                     logger.info(
-                        "trace=%s Unity request completed %s duration_ms=%s "
-                        "response=%s",
+                        "trace=%s Unity HTTP request completed %s duration_ms=%s response=%s",
                         trace_id,
                         request_summary,
                         duration_ms,
-                        response_summary,
+                        _describe_response(response),
                     )
                     return response
-
-                except UnityRequestTimeoutError as e:
-                    last_failure = (
-                        f"Unity request timed out during {e.phase} "
-                        f"after {self.request_timeout}s"
-                    )
-                    await self.disconnect(reason=f"request-timeout:{e.phase}")
                 except (
-                    asyncio.IncompleteReadError,
-                    ConnectionResetError,
-                    BrokenPipeError,
+                    ConnectionError,
                     ConnectionRefusedError,
+                    TimeoutError,
+                    error.URLError,
                     OSError,
-                ) as e:
-                    duration_ms = round((time.perf_counter() - started_at) * 1000)
-                    now = time.perf_counter()
-                    connection_age_ms = (
-                        round((now - self._connected_at) * 1000)
-                        if self._connected_at is not None
-                        else None
-                    )
-                    idle_ms = (
-                        round((now - self._last_request_completed_at) * 1000)
-                        if self._last_request_completed_at is not None
-                        else None
-                    )
+                ) as exc:
+                    attempt += 1
+                    last_failure = str(exc)
                     logger.warning(
-                        "trace=%s Unity request transport error %s "
-                        "duration_ms=%s error_type=%s error=%s "
-                        "connection_age_ms=%s idle_ms=%s",
+                        "trace=%s Unity HTTP request transport error %s attempt=%s/%s error_type=%s error=%s",
                         trace_id,
                         request_summary,
-                        duration_ms,
-                        type(e).__name__,
-                        e,
-                        connection_age_ms,
-                        idle_ms,
-                        exc_info=True,
+                        attempt,
+                        self.retry_count,
+                        type(exc).__name__,
+                        exc,
                     )
-                    last_failure = (
-                        f"Unity connection dropped during request. Last error: {e}"
+                    if attempt >= self.retry_count:
+                        break
+                    await self._sleep_before_retry(
+                        trace_id=trace_id,
+                        request_summary=request_summary,
+                        attempt=attempt,
+                        reason="transport-retry",
                     )
-                    await self.disconnect(reason=f"request-error:{type(e).__name__}")
-                except Exception as e:
-                    duration_ms = round((time.perf_counter() - started_at) * 1000)
+                except Exception as exc:
                     logger.error(
-                        "trace=%s Unity request failed unexpectedly %s duration_ms=%s",
+                        "trace=%s Unity HTTP request failed unexpectedly %s",
                         trace_id,
                         request_summary,
-                        duration_ms,
                         exc_info=True,
                     )
-                    await self.disconnect(reason="unexpected-error")
-                    return self._build_error(request, -32603, f"Internal error: {e}")
-
-                # Send failed — check if we can retry
-                if not self._should_retry(attempt, self.retry_count, deadline):
-                    break
-
-                await self._sleep_before_retry(
-                    trace_id=trace_id,
-                    request_summary=request_summary,
-                    attempt=attempt,
-                    deadline=deadline,
-                    reason="request-retry",
-                )
+                    return self._build_error(
+                        request_payload, -32603, f"Internal error: {exc}"
+                    )
 
             duration_ms = round((time.perf_counter() - started_at) * 1000)
             logger.warning(
-                "trace=%s Unity request exhausted retries %s duration_ms=%s "
-                "last_failure=%s",
+                "trace=%s Unity HTTP request exhausted retries %s duration_ms=%s last_failure=%s",
                 trace_id,
                 request_summary,
                 duration_ms,
                 last_failure,
             )
             return self._build_error(
-                request,
+                request_payload,
                 REQUEST_UNAVAILABLE_ERROR_CODE,
                 self._build_retryable_error_message(last_failure),
             )
+
+
+UnityTcpClient = UnityHttpClient
 
 
 class SafeServer(Server):
@@ -772,19 +543,15 @@ class SafeServer(Server):
 
 
 class UnityBridgeClient(Protocol):
-    """Minimal client interface shared by the TCP and HTTP bridge transports."""
+    """Minimal client interface shared by the bridge transport."""
 
-    async def send_request(self, request: dict[str, Any]) -> dict[str, Any]: ...
+    async def send_request(self, request_payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
 def _convert_resource_contents(
     resource: dict[str, Any],
 ) -> types.TextResourceContents:
-    """Convert Unity resource payload to an MCP TextResourceContents object.
-
-    Blob payloads are not supported by the protocol and are ignored.
-    """
-    # Ignore any `blob` payloads — always map to TextResourceContents.
+    """Convert Unity resource payload to an MCP TextResourceContents object."""
     return types.TextResourceContents(
         uri=resource.get("uri", ""),
         mimeType=resource.get("mimeType"),
@@ -823,7 +590,6 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        """List available tools from Unity."""
         response = await unity_client.send_request(
             {
                 "jsonrpc": "2.0",
@@ -834,12 +600,11 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
         )
 
         if "error" in response:
-            logger.error(f"Error listing tools: {response['error']}")
+            logger.error("Error listing tools: %s", response["error"])
             return []
 
         result = response.get("result", {})
         tools = result.get("tools", [])
-
         return [
             types.Tool(
                 name=tool["name"],
@@ -853,7 +618,6 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
     async def call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-        """Call a tool in Unity."""
         response = await unity_client.send_request(
             {
                 "jsonrpc": "2.0",
@@ -864,16 +628,16 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
         )
 
         if "error" in response:
-            error = response["error"]
+            error_payload = response["error"]
             return [
                 types.TextContent(
-                    type="text", text=f"Error: {error.get('message', 'Unknown error')}"
+                    type="text",
+                    text=f"Error: {error_payload.get('message', 'Unknown error')}",
                 )
             ]
 
         result = response.get("result", {})
         content = result.get("content", [])
-
         mcp_content: list[
             types.TextContent | types.ImageContent | types.EmbeddedResource
         ] = []
@@ -890,7 +654,6 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
 
     @server.list_prompts()
     async def list_prompts() -> list[types.Prompt]:
-        """List available prompts from Unity."""
         response = await unity_client.send_request(
             {
                 "jsonrpc": "2.0",
@@ -901,12 +664,11 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
         )
 
         if "error" in response:
-            logger.error(f"Error listing prompts: {response['error']}")
+            logger.error("Error listing prompts: %s", response["error"])
             return []
 
         result = response.get("result", {})
         prompts = result.get("prompts", [])
-
         return [
             types.Prompt(
                 name=prompt["name"],
@@ -927,7 +689,6 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
     async def get_prompt(
         name: str, arguments: dict[str, str] | None = None
     ) -> types.GetPromptResult:
-        """Get a prompt from Unity."""
         response = await unity_client.send_request(
             {
                 "jsonrpc": "2.0",
@@ -938,31 +699,30 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
         )
 
         if "error" in response:
-            error = response["error"]
+            error_payload = response["error"]
             return types.GetPromptResult(
-                description=f"Error: {error.get('message', 'Unknown error')}",
+                description=f"Error: {error_payload.get('message', 'Unknown error')}",
                 messages=[],
             )
 
         result = response.get("result", {})
         messages = result.get("messages", [])
-
         return types.GetPromptResult(
             description=result.get("description"),
             messages=[
                 types.PromptMessage(
-                    role=msg["role"],
+                    role=message["role"],
                     content=types.TextContent(
-                        type="text", text=msg.get("content", {}).get("text", "")
+                        type="text",
+                        text=message.get("content", {}).get("text", ""),
                     ),
                 )
-                for msg in messages
+                for message in messages
             ],
         )
 
     @server.list_resources()
     async def list_resources() -> list[types.Resource]:
-        """List available resources from Unity."""
         response = await unity_client.send_request(
             {
                 "jsonrpc": "2.0",
@@ -973,25 +733,23 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
         )
 
         if "error" in response:
-            logger.error(f"Error listing resources: {response['error']}")
+            logger.error("Error listing resources: %s", response["error"])
             return []
 
         result = response.get("result", {})
         resources = result.get("resources", [])
-
         return [
             types.Resource(
-                uri=res["uri"],
-                name=res.get("name", ""),
-                description=res.get("description"),
-                mimeType=res.get("mimeType"),
+                uri=resource["uri"],
+                name=resource.get("name", ""),
+                description=resource.get("description"),
+                mimeType=resource.get("mimeType"),
             )
-            for res in resources
+            for resource in resources
         ]
 
     @server.read_resource()
     async def read_resource(uri: AnyUrl) -> str:
-        """Read a resource from Unity."""
         uri_str = str(uri)
         response = await unity_client.send_request(
             {
@@ -1003,16 +761,14 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
         )
 
         if "error" in response:
-            error = response["error"]
-            return f"Error: {error.get('message', 'Unknown error')}"
+            error_payload = response["error"]
+            return f"Error: {error_payload.get('message', 'Unknown error')}"
 
         result = response.get("result", {})
         contents = result.get("contents", [])
-
         if contents and "text" in contents[0]:
             return contents[0]["text"]
 
-        # `blob` is not supported by the protocol — ignore it and return empty string
         return ""
 
     return server
@@ -1038,19 +794,18 @@ async def run_server(
         LOG_BACKUP_COUNT,
     )
 
-    unity_client: UnityTcpClient | None = None
+    unity_client: UnityHttpClient | None = None
     try:
-        unity_client = UnityTcpClient(
+        unity_client = UnityHttpClient(
             host,
             port,
             retry_time,
             retry_count,
-            port_resolver=get_stdio_port,
+            port_resolver=get_http_port,
             request_timeout=request_timeout,
         )
         server = create_server(unity_client)
 
-        # Create memory streams for the server
         client_to_server_send, client_to_server_recv = create_memory_object_stream[
             SessionMessage | Exception
         ](max_buffer_size=100)
@@ -1059,7 +814,6 @@ async def run_server(
         ](max_buffer_size=100)
 
         async def stdin_reader():
-            """Read JSON-RPC messages from stdin using thread pool."""
             raw_stdin = sys.stdin.buffer
             last_line_text = ""
 
@@ -1086,10 +840,8 @@ async def run_server(
 
                     message = JSONRPCMessage.model_validate_json(line_text)
                     await client_to_server_send.send(SessionMessage(message=message))
-
             except anyio.ClosedResourceError:
                 logger.info("stdin reader stopped after client stream closed")
-
             except Exception:
                 logger.error(
                     "stdin_reader error line_preview=%s",
@@ -1100,7 +852,6 @@ async def run_server(
                 await client_to_server_send.aclose()
 
         async def stdout_writer():
-            """Write JSON-RPC messages to stdout using thread pool."""
             raw_stdout = sys.stdout.buffer
             last_message_summary = "<none>"
 
@@ -1139,17 +890,12 @@ async def run_server(
                 tg.cancel_scope.cancel()
         except* anyio.ClosedResourceError:
             logger.info("Bridge stream closed during shutdown")
-
-    except Exception as e:
-        logger.error(f"Server error: {e}", exc_info=True)
-        raise
     finally:
-        if unity_client:
+        if unity_client is not None:
             await unity_client.disconnect(reason="server-shutdown")
 
 
-def main():
-    """Main entry point."""
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="MCP STDIO Bridge for Unity Code MCP Server",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1158,19 +904,19 @@ def main():
         "--retry-time",
         type=float,
         default=2.0,
-        help="Seconds between connection retries",
+        help="Seconds between HTTP retry attempts",
     )
     parser.add_argument(
         "--retry-count",
         type=int,
-        default=15,
-        help="Maximum number of connection retries",
+        default=5,
+        help="Maximum number of HTTP retry attempts",
     )
     parser.add_argument(
         "--request-timeout",
         type=float,
         default=DEFAULT_REQUEST_TIMEOUT,
-        help="Seconds to wait for each Unity request phase before failing the request",
+        help="Seconds to wait for each Unity HTTP request attempt before retrying or failing",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--quiet", action="store_true", help="Suppress logging")
@@ -1178,16 +924,15 @@ def main():
     args = parser.parse_args()
 
     if args.quiet:
-        logger.setLevel(logging.WARNING)
+        logger.setLevel("WARNING")
     elif args.verbose:
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel("DEBUG")
 
-    host = UNITY_HOST
-    port = get_stdio_port()
+    host = UNITY_HTTP_HOST
+    port = get_http_port()
     logger.info(
-        "Unity Code MCP STDIO Bridge starting (Unity at %s:%s, request_timeout=%s)",
-        host,
-        port,
+        "Unity Code MCP STDIO Bridge starting (Unity at %s, request_timeout=%s)",
+        _truncate_for_log(f"{host}:{port}"),
         args.request_timeout,
     )
     asyncio.run(

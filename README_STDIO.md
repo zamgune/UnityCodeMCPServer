@@ -1,13 +1,13 @@
 # Unity Code MCP STDIO Bridge
 
-A Python package that bridges MCP (Model Context Protocol) over STDIO to a Unity TCP Server.
+A Python package that bridges MCP (Model Context Protocol) over STDIO to Unity's Streamable HTTP endpoint.
 
 ## Overview
 
-This bridge enables MCP client to communicate with the UnityCodeMcpServer running inside Unity Editor via TCP. The bridge:
+This bridge enables MCP clients to communicate with UnityCodeMcpServer running inside the Unity Editor via Streamable HTTP. The bridge:
 
 1. Receives MCP messages via STDIO
-2. Forwards them to the Unity TCP Server
+2. Forwards them to the Unity HTTP endpoint
 3. Returns responses back via STDIO
 
 ## Prerequisites
@@ -53,11 +53,11 @@ unity-code-mcp-stdio
 
 | Argument            | Default | Description                                                          |
 | ------------------- | ------- | -------------------------------------------------------------------- |
-| `--retry-time`      | `2`     | Seconds between connection retries                                   |
-| `--retry-count`     | `15`    | Maximum number of connection retries within one bounded MCP request  |
-| `--request-timeout` | `120`   | Maximum total seconds the bridge spends recovering one Unity request |
+| `--retry-time`      | `2`     | Seconds between HTTP retry attempts                                  |
+| `--retry-count`     | `5`     | Maximum number of HTTP retry attempts for one Unity request          |
+| `--request-timeout` | `120`   | Seconds to wait for each Unity HTTP request attempt                  |
 
-> **Note:** The host is hardcoded to `localhost` and the port is read automatically from `UnityCodeMcpServerSettings.asset` inside the Unity project.
+> **Note:** The host is hardcoded to `127.0.0.1` and the port is read automatically from `UnityCodeMcpServerSettings.asset` inside the Unity project.
 
 > **Note:** For the Unity Streamable HTTP backend, Unity now prefers reclaiming the configured HTTP port across its own reloads instead of drifting to a different port. The bridge continues reading the configured port from project settings, so manual port changes should not be required for Unity-owned reload conflicts.
 
@@ -100,7 +100,7 @@ uv run --directory "C:/path/to/STDIO~" unity-code-mcp-stdio --request-timeout 60
 ## Architecture
 
 ```
-┌─────────────────┐      TCP       ┌─────────────────┐     STDIO      ┌─────────────────┐
+┌─────────────────┐   HTTP / SSE   ┌─────────────────┐     STDIO      ┌─────────────────┐
 │                 │                │                 │                │                 │
 │  Unity Editor   │ ◄────────────► │  STDIO Bridge   │ ◄────────────► │  MCP Client     │
 │                 │                │                 │                │                 │
@@ -110,11 +110,11 @@ uv run --directory "C:/path/to/STDIO~" unity-code-mcp-stdio --request-timeout 60
 ### Communication Flow
 
 1. **MCP Client → Bridge (STDIO):** MCP Client sends JSON-RPC 2.0 messages via stdin
-2. **Bridge → Unity (TCP):** Bridge forwards messages to Unity Tcp Server
-3. **Unity → Bridge (TCP):** Unity Tcp Server responds back to Bridge
+2. **Bridge → Unity (HTTP):** Bridge forwards each message as a fresh HTTP POST to Unity's `/mcp/` endpoint
+3. **Unity → Bridge (HTTP/SSE):** Unity responds with JSON or an SSE message containing the MCP response
 4. **Bridge → MCP Client (STDIO):** Bridge writes response to stdout
 
-If Unity drops the TCP connection during a request, the bridge now fails that request fast and leaves the next MCP request to establish a fresh Unity TCP connection.
+If Unity is unavailable during a request, the bridge retries the same HTTP request within the configured retry budget and then returns an actionable error if Unity still has not recovered.
 
 ## Logging
 
@@ -125,9 +125,9 @@ Each request now records enough context to trace failures across the transport b
 - A bridge-local trace id for every forwarded Unity request
 - The JSON-RPC request id and method
 - Tool name, URI, and argument key summary when present
-- Connect, reconnect, send, receive, shutdown, and closed-stream events
+- HTTP request start, retry, response, shutdown, and closed-stream events
 - Request duration, response summary, and error type/message on failure
-- Timeout phase information when a request stalls after connect, during write, or while waiting for the response
+- HTTP status, content type, and timeout details when a request stalls or fails
 - The last stdin line preview or last stdout message preview when framing breaks
 
 Log retention is bounded with size-based rotation:
@@ -186,7 +186,7 @@ Postman supports MCP (Model Context Protocol) natively, including STDIO transpor
 3. **Configure the STDIO command:**
 
    ```
-   uv run --directory "C:/Users/YOUR_USERNAME/path/to/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO" unity-code-mcp-stdio
+  uv run --directory "C:/Users/YOUR_USERNAME/path/to/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~" unity-code-mcp-stdio
    ```
 
    > **Tip:** You can also paste JSON configuration directly:
