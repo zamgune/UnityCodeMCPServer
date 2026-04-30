@@ -10,7 +10,6 @@ namespace UnityCodeMcpServer.Settings
     public static class ServerLifecycleCoordinator
     {
         private static Action _startHttp = UnityCodeMcpHttpServer.StartServer;
-        private static Action _stopHttp = UnityCodeMcpHttpServer.StopServer;
         private static Action _restartHttp = UnityCodeMcpHttpServer.RestartServer;
 
         public static void UpdateServerState()
@@ -31,18 +30,15 @@ namespace UnityCodeMcpServer.Settings
 
         public static void SetHandlers(
             Action startHttp = null,
-            Action stopHttp = null,
             Action restartHttp = null)
         {
             _startHttp = startHttp ?? UnityCodeMcpHttpServer.StartServer;
-            _stopHttp = stopHttp ?? UnityCodeMcpHttpServer.StopServer;
             _restartHttp = restartHttp ?? UnityCodeMcpHttpServer.RestartServer;
         }
 
         public static void ResetHandlers()
         {
             _startHttp = UnityCodeMcpHttpServer.StartServer;
-            _stopHttp = UnityCodeMcpHttpServer.StopServer;
             _restartHttp = UnityCodeMcpHttpServer.RestartServer;
         }
     }

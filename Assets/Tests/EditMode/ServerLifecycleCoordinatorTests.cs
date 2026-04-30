@@ -8,19 +8,16 @@ namespace UnityCodeMcpServer.Tests.EditMode
     public class ServerLifecycleCoordinatorTests
     {
         private int _startHttpCount;
-        private int _stopHttpCount;
         private int _restartHttpCount;
 
         [SetUp]
         public void SetUp()
         {
             _startHttpCount = 0;
-            _stopHttpCount = 0;
             _restartHttpCount = 0;
 
             ServerLifecycleCoordinator.SetHandlers(
                 startHttp: () => _startHttpCount++,
-                stopHttp: () => _stopHttpCount++,
                 restartHttp: () => _restartHttpCount++);
         }
 
@@ -37,7 +34,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
 
             Assert.That(_startHttpCount, Is.EqualTo(1));
             Assert.That(_restartHttpCount, Is.EqualTo(0));
-            Assert.That(_stopHttpCount, Is.EqualTo(0));
         }
 
         [Test]
@@ -47,7 +43,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
 
             Assert.That(_restartHttpCount, Is.EqualTo(1));
             Assert.That(_startHttpCount, Is.EqualTo(0));
-            Assert.That(_stopHttpCount, Is.EqualTo(0));
         }
 
         [Test]
@@ -60,7 +55,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
 
                 Assert.That(_startHttpCount, Is.EqualTo(1));
                 Assert.That(_restartHttpCount, Is.EqualTo(0));
-                Assert.That(_stopHttpCount, Is.EqualTo(0));
             }
             finally
             {

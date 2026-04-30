@@ -28,7 +28,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
         {
             ServerLifecycleCoordinator.SetHandlers(
                 startHttp: () => { },
-                stopHttp: () => { },
                 restartHttp: () => { });
         }
 
@@ -245,7 +244,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
             int restartHttpCount = 0;
             ServerLifecycleCoordinator.SetHandlers(
                 startHttp: () => { },
-                stopHttp: () => { },
                 restartHttp: () => restartHttpCount++);
 
             UnityCodeMcpServerSettings settings = ScriptableObject.CreateInstance<UnityCodeMcpServerSettings>();
@@ -270,7 +268,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
             int restartHttpCount = 0;
             ServerLifecycleCoordinator.SetHandlers(
                 startHttp: () => { },
-                stopHttp: () => { },
                 restartHttp: () => restartHttpCount++);
 
             UnityCodeMcpServerSettings settings = ScriptableObject.CreateInstance<UnityCodeMcpServerSettings>();
