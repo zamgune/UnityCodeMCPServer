@@ -58,6 +58,8 @@ Returns pass/fail status, total execution time, and detailed stack traces for an
         public async UniTask<ToolsCallResult> ExecuteAsync(JsonElement arguments)
         {
             TestOptions options = ParseArguments(arguments);
+            List<string> sceneState = null;
+            TestRunnerApi api = null;
 
             ToolsCallResult compilationBlockResult = GetCompilationBlockedResult();
             if (compilationBlockResult != null)
@@ -65,19 +67,24 @@ Returns pass/fail status, total execution time, and detailed stack traces for an
                 return compilationBlockResult;
             }
 
+            if (ShouldBlockTestExecution(EditorApplication.isPlayingOrWillChangePlaymode))
+            {
+                return BuildPlayModeStateBlockedResult();
+            }
+
             if (ShouldBlockEditMode(options.Mode, EditorApplication.isPlaying))
             {
                 return BuildEditModeBlockedResult();
             }
 
-            // Save dirty scenes and capture current scene state before running tests
-            EditorSceneStateRestorer.SaveDirtyScenes();
-            List<string> sceneState = EditorSceneStateRestorer.CaptureCurrentSceneState();
-
-            TestRunnerApi api = ScriptableObject.CreateInstance<TestRunnerApi>();
-
             try
             {
+                // Save dirty scenes and capture current scene state before running tests.
+                EditorSceneStateRestorer.SaveDirtyScenes();
+                sceneState = EditorSceneStateRestorer.CaptureCurrentSceneState();
+
+                api = ScriptableObject.CreateInstance<TestRunnerApi>();
+
                 if (options.Mode == (TestMode.EditMode | TestMode.PlayMode))
                 {
                     // Run both modes sequentially
@@ -116,8 +123,15 @@ Returns pass/fail status, total execution time, and detailed stack traces for an
             }
             finally
             {
-                UnityEngine.Object.DestroyImmediate(api);
-                EditorSceneStateRestorer.RestoreSceneStateWhenSafe(sceneState);
+                if (api != null)
+                {
+                    UnityEngine.Object.DestroyImmediate(api);
+                }
+
+                if (sceneState != null)
+                {
+                    EditorSceneStateRestorer.RestoreSceneStateWhenSafe(sceneState);
+                }
             }
         }
 
@@ -157,9 +171,19 @@ Returns pass/fail status, total execution time, and detailed stack traces for an
             return (mode & TestMode.EditMode) == TestMode.EditMode;
         }
 
+        public static bool ShouldBlockTestExecution(bool isPlayingOrWillChangePlaymode)
+        {
+            return isPlayingOrWillChangePlaymode;
+        }
+
         public static ToolsCallResult BuildEditModeBlockedResult()
         {
             return ToolsCallResult.ErrorResult("Cannot run EditMode tests while the editor is in Play Mode.");
+        }
+
+        public static ToolsCallResult BuildPlayModeStateBlockedResult()
+        {
+            return ToolsCallResult.ErrorResult("Cannot run Unity tests while the editor is in or transitioning to Play Mode. Exit Play Mode and retry.");
         }
 
         public static bool ShouldBlockForCompilationIssues(bool isCompiling, bool hasCompileErrors)
