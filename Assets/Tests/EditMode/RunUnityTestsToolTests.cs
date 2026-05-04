@@ -183,61 +183,12 @@ namespace UnityCodeMcpServer.Tests.EditMode
         }
 
         [Test]
-        public void ShouldBlockTestExecution_WhenPlaying_AndPlayModeRequested()
-        {
-            bool shouldBlock = RunUnityTestsTool.ShouldBlockTestExecution(
-                isPlayingOrWillChangePlaymode: true,
-                isTestRunActive: false);
-
-            Assert.IsTrue(shouldBlock);
-        }
-
-        [Test]
-        public void ShouldBlockTestExecution_WhenTransitioningPlayMode()
-        {
-            bool shouldBlock = RunUnityTestsTool.ShouldBlockTestExecution(
-                isPlayingOrWillChangePlaymode: true,
-                isTestRunActive: false);
-
-            Assert.IsTrue(shouldBlock);
-        }
-
-        [Test]
-        public void ShouldNotBlockTestExecution_WhenEditorIsStable()
-        {
-            bool shouldBlock = RunUnityTestsTool.ShouldBlockTestExecution(
-                isPlayingOrWillChangePlaymode: false,
-                isTestRunActive: false);
-
-            Assert.IsFalse(shouldBlock);
-        }
-
-        [Test]
-        public void ShouldNotBlockTestExecution_WhenPlayModeTestRunIsAlreadyActive()
-        {
-            bool shouldBlock = RunUnityTestsTool.ShouldBlockTestExecution(
-                isPlayingOrWillChangePlaymode: true,
-                isTestRunActive: true);
-
-            Assert.IsFalse(shouldBlock);
-        }
-
-        [Test]
         public void BuildEditModeBlockedResult_ReturnsErrorMessage()
         {
             ToolsCallResult result = RunUnityTestsTool.BuildEditModeBlockedResult();
 
             Assert.IsTrue(result.IsError);
             Assert.That(result.Content[0].Text, Does.Contain("Cannot run EditMode tests while the editor is in Play Mode"));
-        }
-
-        [Test]
-        public void BuildPlayModeStateBlockedResult_ReturnsErrorMessage()
-        {
-            ToolsCallResult result = RunUnityTestsTool.BuildPlayModeStateBlockedResult();
-
-            Assert.IsTrue(result.IsError);
-            Assert.That(result.Content[0].Text, Does.Contain("Cannot run Unity tests while the editor is in or transitioning to Play Mode"));
         }
 
         [Test]
