@@ -22,12 +22,15 @@ from unity_code_mcp_stdio.unity_code_mcp_bridge_stdio import (
     UnityHttpClient,
     _SETTINGS_FILE,
     _build_rotating_handler,
+    _unity_log_level_to_python_level,
     _convert_content_item,
     _convert_resource_contents,
+    configure_bridge_logger,
     _describe_request,
     _describe_response,
     create_server,
     get_http_port,
+    read_bridge_logging_settings,
     read_http_port_from_settings,
 )
 
@@ -96,6 +99,18 @@ class TestSettingsDiscovery:
         missing = tmp_path / "UnityCodeMcpServerSettings.asset"
 
         assert get_http_port(_settings_file=missing) == DEFAULT_HTTP_PORT
+
+    def test_read_bridge_logging_settings_reads_level_and_log_to_file(self, tmp_path):
+        settings_file = tmp_path / "UnityCodeMcpServerSettings.asset"
+        settings_file.write_text(
+            "MinLogLevel: 3\nLogToFile: 1\n",
+            encoding="utf-8",
+        )
+
+        log_level, log_to_file = read_bridge_logging_settings(settings_file)
+
+        assert log_level == 3
+        assert log_to_file is True
 
 
 class TestUnityHttpClient:
@@ -312,6 +327,34 @@ class TestBridgeLogging:
         assert "id=call_tool_read_unity_console_logs" in summary
         assert "error_code=-32000" in summary
         assert "error_message=Unity connection dropped during request" in summary
+
+    def test_unity_log_level_to_python_level_maps_warn_to_warning(self):
+        assert _unity_log_level_to_python_level(3) == logging.WARNING
+
+    def test_configure_bridge_logger_disables_file_handler_when_log_to_file_is_off(
+        self, tmp_path
+    ):
+        settings_file = tmp_path / "UnityCodeMcpServerSettings.asset"
+        settings_file.write_text(
+            "MinLogLevel: 2\nLogToFile: 0\n",
+            encoding="utf-8",
+        )
+
+        original_handlers = list(stdio_bridge.logger.handlers)
+        original_level = stdio_bridge.logger.level
+
+        try:
+            configure_bridge_logger(settings_file=settings_file)
+
+            assert stdio_bridge.logger.level == logging.INFO
+            assert stdio_bridge.logger.handlers == []
+        finally:
+            for handler in list(stdio_bridge.logger.handlers):
+                stdio_bridge.logger.removeHandler(handler)
+                handler.close()
+            for handler in original_handlers:
+                stdio_bridge.logger.addHandler(handler)
+            stdio_bridge.logger.setLevel(original_level)
 
 
 class TestJsonRpcMessages:
