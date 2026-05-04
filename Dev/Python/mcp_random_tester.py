@@ -73,7 +73,7 @@ def build_server_parameters(bridge_dir: Path) -> StdioServerParameters:
             "run",
             "--directory",
             str(bridge_dir),
-            "unity-code-mcp-stdio-over-file",
+            "unity-code-mcp-stdio",
         ],
     )
 
@@ -522,9 +522,7 @@ class ScriptSelfTests(unittest.TestCase):
             ) -> types.CallToolResult:
                 self.calls.append((tool_name, arguments))
                 return types.CallToolResult(
-                    content=[
-                        types.TextContent(type="text", text=f"ok:{tool_name}")
-                    ],
+                    content=[types.TextContent(type="text", text=f"ok:{tool_name}")],
                     isError=False,
                 )
 

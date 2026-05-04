@@ -111,7 +111,7 @@ If Unity does not produce a matching response file before the timeout expires, t
 
 ## Logging
 
-The bridge writes diagnostics to `src/unity_code_mcp_stdio/unity_code_mcp_bridge_over_file.log` next to the Python entrypoint. Logging stays file-only so stdout remains clean for JSON-RPC traffic.
+The bridge writes diagnostics to `src/unity_code_mcp_stdio/unity-code-mcp-stdio.log` next to the Python entrypoint. Logging stays file-only so stdout remains clean for JSON-RPC traffic.
 
 Each request now records enough context to trace failures across the transport boundary:
 
@@ -125,7 +125,7 @@ Each request now records enough context to trace failures across the transport b
 
 Log retention is bounded with size-based rotation:
 
-- Active log file: `unity_code_mcp_bridge_over_file.log`
+- Active log file: `unity-code-mcp-stdio.log`
 - Maximum size per file: 5 MB
 - Retained rotated files: 3 backups
 - Maximum on-disk footprint: about 20 MB including the active file

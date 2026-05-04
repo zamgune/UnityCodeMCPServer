@@ -27,7 +27,6 @@ dependencies = [
 
 [project.scripts]
 unity-code-mcp-stdio = "unity_code_mcp_stdio:main"
-unity-code-mcp-stdio-over-file = "unity_code_mcp_stdio.unity_code_mcp_bridge_over_file:main"
 
 [project.optional-dependencies]
 dev = [

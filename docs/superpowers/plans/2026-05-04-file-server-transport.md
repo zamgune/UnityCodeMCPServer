@@ -23,7 +23,7 @@ import json
 
 import pytest
 
-from unity_code_mcp_stdio.unity_code_mcp_bridge_over_file import (
+from unity_code_mcp_stdio.unity_code_mcp_stdio import (
     DEFAULT_FILE_REQUEST_TIMEOUT,
     FileBridgePaths,
     UnityFileClient,
@@ -81,12 +81,12 @@ async def test_send_request_returns_timeout_error_and_removes_request_file(tmp_p
 - [ ] **Step 2: Run the targeted Python tests to verify they fail**
 
 Run: `cd Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~; .\.venv\Scripts\python.exe -m pytest tests/test_bridge_over_file.py -v`
-Expected: FAIL because `unity_code_mcp_bridge_over_file` and its file transport types do not exist yet.
+Expected: FAIL because `unity_code_mcp_stdio` and its file transport types do not exist yet.
 
 ### Task 2: Implement the Python file-backed bridge
 
 **Files:**
-- Create: `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/src/unity_code_mcp_stdio/unity_code_mcp_bridge_over_file.py`
+- Create: `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/src/unity_code_mcp_stdio/unity_code_mcp_stdio.py`
 - Modify: `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/src/unity_code_mcp_stdio/__init__.py`
 - Modify: `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/pyproject.toml`
 - Test: `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/tests/test_bridge_over_file.py`
@@ -143,7 +143,7 @@ class UnityFileClient:
 ```toml
 [project.scripts]
 unity-code-mcp-stdio = "unity_code_mcp_stdio:main"
-unity-code-mcp-stdio-over-file = "unity_code_mcp_stdio.unity_code_mcp_bridge_over_file:main"
+unity-code-mcp-stdio = "unity_code_mcp_stdio:main"
 ```
 
 - [ ] **Step 3: Run the targeted Python tests to verify they pass**

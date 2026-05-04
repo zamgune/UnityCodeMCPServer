@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp import types
 
-from unity_code_mcp_stdio.unity_code_mcp_bridge_over_file import (
+from unity_code_mcp_stdio.unity_code_mcp_stdio import (
     DEFAULT_FILE_REQUEST_TIMEOUT,
     FileBridgePaths,
     UnityFileClient,
@@ -25,7 +25,7 @@ MODULE_PATH = (
     Path(__file__).resolve().parent.parent
     / "src"
     / "unity_code_mcp_stdio"
-    / "unity_code_mcp_bridge_over_file.py"
+    / "unity_code_mcp_stdio.py"
 )
 
 
@@ -50,7 +50,7 @@ class TestFileBridgePaths:
 
     def test_package_main_uses_file_bridge_entrypoint(self):
         import unity_code_mcp_stdio
-        import unity_code_mcp_stdio.unity_code_mcp_bridge_over_file as file_bridge
+        import unity_code_mcp_stdio.unity_code_mcp_stdio as file_bridge
 
         assert unity_code_mcp_stdio.main is file_bridge.main
         assert unity_code_mcp_stdio.UnityFileClient is file_bridge.UnityFileClient
