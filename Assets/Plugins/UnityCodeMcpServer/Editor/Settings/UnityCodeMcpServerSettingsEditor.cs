@@ -34,6 +34,7 @@ namespace UnityCodeMcpServer.Settings.Editor
         public override void OnInspectorGUI()
         {
             UnityCodeMcpServerSettings settings = (UnityCodeMcpServerSettings)target;
+            bool wasDirtyBeforeGui = EditorUtility.IsDirty(settings);
             serializedObject.Update();
 
             // Draw default properties
@@ -133,9 +134,12 @@ namespace UnityCodeMcpServer.Settings.Editor
                 EditorGUI.indentLevel--;
             }
 
-            serializedObject.ApplyModifiedProperties();
-            if (EditorUtility.IsDirty(settings) && !EditorApplication.isUpdating && !EditorApplication.isCompiling)
+            bool appliedChanges = serializedObject.ApplyModifiedProperties();
+            if ((wasDirtyBeforeGui || appliedChanges || EditorUtility.IsDirty(settings))
+                && !EditorApplication.isUpdating
+                && !EditorApplication.isCompiling)
             {
+                EditorUtility.SetDirty(settings);
                 AssetDatabase.SaveAssetIfDirty(settings);
             }
         }

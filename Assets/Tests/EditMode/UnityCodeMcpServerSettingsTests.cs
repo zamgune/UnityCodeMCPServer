@@ -16,20 +16,6 @@ namespace UnityCodeMcpServer.Tests.EditMode
     [TestFixture]
     public class UnityCodeMcpServerSettingsTests
     {
-        [SetUp]
-        public void SetUp()
-        {
-            ServerLifecycleCoordinator.SetHandlers(
-                startServer: () => { },
-                restartServer: () => { });
-        }
-
-        [TearDown]
-        public void TearDown()
-        {
-            ServerLifecycleCoordinator.ResetHandlers();
-        }
-
         [Test]
         public void DefaultLogToFile_IsFalse()
         {

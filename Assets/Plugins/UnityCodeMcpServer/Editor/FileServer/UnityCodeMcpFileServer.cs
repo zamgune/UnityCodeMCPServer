@@ -22,6 +22,7 @@ namespace UnityCodeMcpServer.FileServer
 
         static UnityCodeMcpFileServer()
         {
+            UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Static constructor");
             if (Application.isBatchMode)
             {
                 return;
@@ -44,20 +45,11 @@ namespace UnityCodeMcpServer.FileServer
 
         private static void OnAfterAssemblyReload()
         {
+            UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] OnAfterAssemblyReload event");
             StartServer("assembly-reload");
         }
 
-        public static void StartServer()
-        {
-            StartServer("requested");
-        }
-
-        public static void StopServer()
-        {
-            StopServer("requested");
-        }
-
-        public static void StopServer(string reason)
+        private static void StopServer(string reason)
         {
             _serverCts?.Cancel();
             _serverCts?.Dispose();
@@ -78,7 +70,7 @@ namespace UnityCodeMcpServer.FileServer
             _registry = null;
             Interlocked.Exchange(ref _isProcessing, 0);
 
-            UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Server stopped reason={reason}");
+            UnityCodeMcpServerLogger.Info($"[UnityCodeMcpFileServer] Server stopped reason={reason}");
         }
 
         private static void StartServer(string reason)
@@ -199,6 +191,7 @@ namespace UnityCodeMcpServer.FileServer
             watcher.Created += OnRequestFileEvent;
             watcher.Changed += OnRequestFileEvent;
             watcher.Renamed += OnRequestFileRenamed;
+            UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Created file watcher for directory={messagesDirectory}");
             return watcher;
         }
 
@@ -220,13 +213,13 @@ namespace UnityCodeMcpServer.FileServer
             }
 
             ct.ThrowIfCancellationRequested();
-            UnityCodeMcpServerLogger.Info($"[UnityCodeMcpFileServer] Processing request file request={request.RequestPath}");
+            UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Processing request file request={request.RequestPath}");
             string requestJson = await File.ReadAllTextAsync(request.RequestPath, ct);
             string responseJson = await ProcessRequestJsonAsync(messageHandler, requestJson, ct);
             if (responseJson != null)
             {
                 await WriteAllTextAtomicallyAsync(request.ResponsePath, responseJson, ct);
-                UnityCodeMcpServerLogger.Info($"[UnityCodeMcpFileServer] Wrote response file response={request.ResponsePath}");
+                UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Wrote response file response={request.ResponsePath}");
             }
             else
             {

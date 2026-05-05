@@ -276,9 +276,19 @@ namespace UnityCodeMcpServer.Settings
 
                 SaveInstance(_instance);
 
+                // Asset creation/import can invalidate the transient ScriptableObject reference.
+                // Reload the persisted asset so subsequent calls return the canonical cached instance.
+                UnityCodeMcpServerSettings unityCodeMcpServerSettings = LoadSettingsAsset(_settingsAssetPath);
+                _instance = unityCodeMcpServerSettings == null ? _instance : unityCodeMcpServerSettings;
+
                 return _instance;
             }
 
+        }
+
+        private void OnValidate()
+        {
+            _instance = null;
         }
 
         public static void SaveInstance(UnityCodeMcpServerSettings instance)
@@ -306,15 +316,6 @@ namespace UnityCodeMcpServer.Settings
             AssetDatabase.SaveAssets();
             AssetDatabase.ImportAsset(_settingsAssetPath, ImportAssetOptions.ForceUpdate);
             Debug.Log($"{Protocol.McpProtocol.LogPrefix} Created new UnityCodeMcpServerSettings asset at {_settingsAssetPath}");
-        }
-
-        /// <summary>
-        /// Start/stop servers according to the current startup selection.
-        /// Exposed for tests and editor automation.
-        /// </summary>
-        public void ApplySelection()
-        {
-            ServerLifecycleCoordinator.UpdateServerState();
         }
 
         /// <summary>
