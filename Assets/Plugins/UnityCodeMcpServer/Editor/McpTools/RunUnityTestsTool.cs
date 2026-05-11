@@ -10,6 +10,7 @@ using UnityCodeMcpServer.Protocol;
 using UnityEditor;
 using UnityEditor.TestTools.TestRunner.Api;
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace UnityCodeMcpServer.McpTools
 {
@@ -76,8 +77,20 @@ Returns pass/fail status, total execution time, and detailed stack traces for an
 
             TestRunnerApi api = ScriptableObject.CreateInstance<TestRunnerApi>();
 
+            bool applicationRunInBackground = Application.runInBackground;
+            // InputSettings.BackgroundBehavior previousBackgroundBehavior = InputSystem.settings.backgroundBehavior;
+            // InputSettings.EditorInputBehaviorInPlayMode previousEditorInputBehavior = InputSystem.settings.editorInputBehaviorInPlayMode;
+
             try
             {
+                // Bypass Input System focus gating so input works without window focus.
+                Application.runInBackground = true;
+                UnityCodeMcpServerLogger.Info($"#PlayUnityGameTool: Set Application.runInBackground=true to allow input without focus. Previous value was {applicationRunInBackground}.");
+                // InputSystem.settings.backgroundBehavior = InputSettings.BackgroundBehavior.IgnoreFocus;
+                // UnityCodeMcpServerLogger.Info($"#PlayUnityGameTool: Set InputSystem.settings.backgroundBehavior=IgnoreFocus to bypass focus gating. Previous value was {previousBackgroundBehavior}.");
+                // InputSystem.settings.editorInputBehaviorInPlayMode = InputSettings.EditorInputBehaviorInPlayMode.AllDeviceInputAlwaysGoesToGameView;
+                // UnityCodeMcpServerLogger.Info($"#PlayUnityGameTool: Set InputSystem.settings.editorInputBehaviorInPlayMode=AllDeviceInputAlwaysGoesToGameView to ensure input is sent to game view. Previous value was {previousEditorInputBehavior}.");
+
                 if (options.Mode == (TestMode.EditMode | TestMode.PlayMode))
                 {
                     // Run both modes sequentially
@@ -116,6 +129,13 @@ Returns pass/fail status, total execution time, and detailed stack traces for an
             }
             finally
             {
+                Application.runInBackground = applicationRunInBackground;
+                UnityCodeMcpServerLogger.Info($"#PlayUnityGameTool: Restored Application.runInBackground to {applicationRunInBackground}.");
+                // InputSystem.settings.backgroundBehavior = previousBackgroundBehavior;
+                // UnityCodeMcpServerLogger.Info($"#PlayUnityGameTool: Restored InputSystem.settings.backgroundBehavior to {previousBackgroundBehavior}.");
+                // InputSystem.settings.editorInputBehaviorInPlayMode = previousEditorInputBehavior;
+                // UnityCodeMcpServerLogger.Info($"#PlayUnityGameTool: Restored InputSystem.settings.editorInputBehaviorInPlayMode to {previousEditorInputBehavior}.");
+
                 UnityEngine.Object.DestroyImmediate(api);
                 EditorSceneStateRestorer.RestoreSceneStateWhenSafe(sceneState);
             }
