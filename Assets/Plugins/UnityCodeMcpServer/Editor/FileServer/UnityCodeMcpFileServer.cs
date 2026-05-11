@@ -22,7 +22,7 @@ namespace UnityCodeMcpServer.FileServer
 
         static UnityCodeMcpFileServer()
         {
-            UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Static constructor");
+            UnityCodeMcpServerLogger.Trace($"[UnityCodeMcpFileServer] Static constructor");
             if (Application.isBatchMode)
             {
                 return;
