@@ -40,11 +40,6 @@ The agent completed the full "cities from CSV to scene" workflow.
   - Added `CityComponent` and assigned the matching `CitySO`
   - Added `SpriteRenderer` and assigned the default sprite from `City.png`
 
-Related files in this example:
-
-- `cities.csv`
-- `CitiesImporter.cs`
-
 ## Transcript
 
 Used ChatGPT 5.2

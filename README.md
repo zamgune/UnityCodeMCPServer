@@ -143,7 +143,7 @@ The `unity-code-mcp-stdio` bridge forwards STDIO traffic to Unity through `.unit
       "args": [
         "run",
         "--directory",
-        "C:/Users/YOUR_USERNAME/path/to/UnityProject/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~",
+        "C:/path/to/UnityProject/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~",
         "unity-code-mcp-stdio"
       ]
     }
