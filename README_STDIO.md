@@ -4,7 +4,7 @@ A Python package that bridges MCP (Model Context Protocol) over STDIO to Unity's
 
 ## Overview
 
-This bridge enables MCP clients to communicate with UnityCodeMcpServer running inside the Unity Editor through `.unityCodeMcpServer/messages`. The bridge:
+This bridge enables MCP clients to communicate with UnityCodeMcpServer running inside the Unity Editor through `.unityCodeMcpServer/messages`. It:
 
 1. Receives MCP messages via STDIO
 2. Writes them to Unity request files
@@ -34,7 +34,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### Using uv (Recommended)
 
-No installation needed! uv runs the package directly:
+No installation step is required. Run the packaged bridge directly:
 
 ```bash
 uv run --directory /path/to/STDIO~ unity-code-mcp-stdio
@@ -55,7 +55,7 @@ unity-code-mcp-stdio
 | ------------------- | ------- | --------------------------------------------------------------- |
 | `--request-timeout` | `180`   | Seconds to wait for a Unity response file before failing        |
 
-> **Note:** The bridge resolves the Unity project root automatically from the packaged `STDIO~` folder and exchanges files through `.unityCodeMcpServer/messages`.
+> **Note:** The bridge resolves the Unity project root automatically from the packaged `STDIO~` folder.
 
 ### Examples
 
@@ -92,30 +92,51 @@ uv run --directory "C:/path/to/STDIO~" unity-code-mcp-stdio --request-timeout 24
 
 ## Architecture
 
-```
-┌─────────────────┐   request/response files   ┌─────────────────┐     STDIO      ┌─────────────────┐
-│                 │                            │                 │                │                 │
-│  Unity Editor   │ ◄────────────────────────► │  STDIO Bridge   │ ◄────────────► │  MCP Client     │
-│                 │                            │                 │                │                 │
-└─────────────────┘                            └─────────────────┘                └─────────────────┘
+```mermaid
+graph LR
+    A["MCP Client<br/>AI Agent"] -->|STDIO| B["STDIO Bridge<br/>Python script"]
+    B <-->|request/response files| C["Unity Code MCP Server<br/>Unity Editor"]
+
+    style A fill:#e1f5ff
+    style B fill:#fff3e0
+    style C fill:#f3e5f5
 ```
 
 ### Communication Flow
+
+```mermaid
+sequenceDiagram
+    participant Client as MCP Client
+    participant Bridge as STDIO Bridge
+    participant Unity as Unity Editor
+
+    Client->>Bridge: JSON-RPC request (stdin)
+    activate Bridge
+    Bridge->>Unity: Write request file
+    deactivate Bridge
+    activate Unity
+    Note over Unity: Process request<br/>Delete request file
+    Unity->>Bridge: Write response file
+    deactivate Unity
+    activate Bridge
+    Bridge->>Client: JSON-RPC response (stdout)
+    deactivate Bridge
+```
+
+**Request/Response Handling:**
 
 1. **MCP Client → Bridge (STDIO):** MCP Client sends JSON-RPC 2.0 messages via stdin
 2. **Bridge → Unity (files):** Bridge writes a request file to `.unityCodeMcpServer/messages`
 3. **Unity → Bridge (files):** Unity claims the request by reading and deleting the request file, then writes a matching response file
 4. **Bridge → MCP Client (STDIO):** Bridge writes the response to stdout
 
-The bridge only waits for the matching response file. It does not require the request file to remain present after Unity starts processing.
-
-If Unity does not produce a matching response file before the timeout expires, the bridge returns an actionable error and removes the pending request file if it is still present.
+The bridge only waits for the matching response file. If Unity does not produce it before the timeout expires, the bridge returns an actionable error and removes the pending request file if it is still present.
 
 ## Logging
 
 The bridge writes diagnostics to `src/unity_code_mcp_stdio/unity-code-mcp-stdio.log` next to the Python entrypoint. Logging stays file-only so stdout remains clean for JSON-RPC traffic.
 
-Each request now records enough context to trace failures across the transport boundary:
+Each request records enough context to trace failures across the transport boundary:
 
 - A bridge-local trace id for every forwarded Unity request
 - The JSON-RPC request id and method
@@ -125,21 +146,19 @@ Each request now records enough context to trace failures across the transport b
 - Timeout details when a request stalls or fails
 - The last stdin line preview or last stdout message preview when framing breaks
 
-Log retention is bounded with size-based rotation:
+Log retention uses size-based rotation:
 
 - Active log file: `unity-code-mcp-stdio.log`
 - Maximum size per file: 5 MB
 - Retained rotated files: 3 backups
 - Maximum on-disk footprint: about 20 MB including the active file
 
-That retention policy avoids unbounded growth while still keeping enough recent history to inspect repeated disconnects or framing issues.
-
 ## Development
 
 ### Running Tests
 
 ```bash
-cd /path/to/STDIO
+cd /path/to/STDIO~
 
 uv run --extra dev pytest tests/
 ```

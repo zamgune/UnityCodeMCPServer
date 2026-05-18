@@ -37,10 +37,6 @@ namespace UnityCodeMcpServer.Settings.Editor
             bool wasDirtyBeforeGui = EditorUtility.IsDirty(settings);
             serializedObject.Update();
 
-            // Draw default properties
-            EditorGUILayout.LabelField("HTTP Server Configuration", EditorStyles.boldLabel);
-            EditorGUILayout.Space();
-
             DrawPropertiesExcluding(serializedObject, "m_Script", "AdditionalAssemblyNames", "InputActionsAssetPath", "SkillsInstallTarget", "SkillsTargetPath");
 
             EditorGUILayout.Space();

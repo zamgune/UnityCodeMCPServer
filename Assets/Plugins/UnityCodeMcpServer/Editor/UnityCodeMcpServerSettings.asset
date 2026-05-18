@@ -12,9 +12,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 712518e95d94d2044b882cb08e60909e, type: 3}
   m_Name: UnityCodeMcpServerSettings
   m_EditorClassIdentifier: UnityCodeMcpServer::UnityCodeMcpServer.Settings.UnityCodeMcpServerSettings
-  MinLogLevel: 0
+  MinLogLevel: 2
   LogToFile: 1
-  AdditionalAssemblyNames: []
+  AdditionalAssemblyNames:
+  - Newtonsoft.Json
   InputActionsAssetPath: 
   SkillsInstallTarget: 2
   SkillsTargetPath: .agents/skills/
