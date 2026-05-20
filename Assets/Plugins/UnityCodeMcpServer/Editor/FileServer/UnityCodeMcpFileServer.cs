@@ -43,6 +43,13 @@ namespace UnityCodeMcpServer.FileServer
             StopServer("assembly-reload");
         }
 
+        [MenuItem("Tools/UnityCodeMcpServer/Restart Server")]
+        public static void RestartServer()
+        {
+            StopServer("manual-restart");
+            StartServer("manual-restart");
+        }
+
         private static void OnAfterAssemblyReload()
         {
             UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] OnAfterAssemblyReload event");
