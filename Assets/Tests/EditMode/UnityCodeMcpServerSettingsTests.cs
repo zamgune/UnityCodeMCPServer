@@ -43,6 +43,18 @@ namespace UnityCodeMcpServer.Tests.EditMode
         }
 
         [Test]
+        public void BuildStdioMcpConfiguration_IncludesExpectedBridgeConfig()
+        {
+            string configuration = UnityCodeMcpServerSettings.BuildStdioMcpConfiguration();
+            string expectedPath = Path.GetFullPath("Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~").Replace("\\", "/");
+
+            Assert.That(configuration, Does.Contain("\"servers\""));
+            Assert.That(configuration, Does.Contain("\"unity-code-mcp-stdio\""));
+            Assert.That(configuration, Does.Contain("\"command\": \"uv\""));
+            Assert.That(configuration, Does.Contain(expectedPath));
+        }
+
+        [Test]
         public void DefaultAssemblyNames_ContainsExpectedAssemblies()
         {
             Assert.That(UnityCodeMcpServerSettings.DefaultAssemblyNames, Contains.Item("System.Core"));

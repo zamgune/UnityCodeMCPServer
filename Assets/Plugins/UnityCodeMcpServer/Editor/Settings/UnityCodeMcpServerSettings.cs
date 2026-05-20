@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using UnityCodeMcpServer.Protocol;
 using UnityEditor;
 using UnityEngine;
 
@@ -341,6 +342,34 @@ namespace UnityCodeMcpServer.Settings
                 EditorGUIUtility.PingObject(settings);
                 Selection.activeObject = settings;
             }
+        }
+
+        /// <summary>
+        /// Print the ready-to-use MCP STDIO configuration to the console.
+        /// </summary>
+        [MenuItem("Tools/UnityCodeMcpServer/Print MCP configuration to console")]
+        public static void PrintMcpConfigurationToConsole()
+        {
+            Debug.Log($"{McpProtocol.LogPrefix} MCP Configuration:\n{BuildStdioMcpConfiguration()}");
+        }
+
+        public static string BuildStdioMcpConfiguration()
+        {
+            string pathToStdio = Path.GetFullPath("Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~").Replace("\\", "/");
+
+            return $@"{{
+    ""servers"": {{
+        ""unity-code-mcp-stdio"": {{
+            ""command"": ""uv"",
+            ""args"": [
+                ""run"",
+                ""--directory"",
+                ""{pathToStdio}"",
+                ""unity-code-mcp-stdio""
+            ]
+        }}
+    }}
+}}";
         }
 
         public static UnityCodeMcpServerSettings GetOrCreateSettingsAsset()

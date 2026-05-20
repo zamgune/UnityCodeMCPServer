@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading;
@@ -46,6 +47,23 @@ namespace UnityCodeMcpServer.Tests.EditMode
 
             Assert.That(messagesDirectory, Is.EqualTo(Path.Combine(_projectRoot, ".unityCodeMcpServer", "messages")));
             Assert.That(Directory.Exists(messagesDirectory), Is.True);
+        }
+
+        [Test]
+        public void RestartServer_MenuItemIsAvailable()
+        {
+            MethodInfo method = typeof(UnityCodeMcpFileServer).GetMethod(
+                "RestartServer",
+                BindingFlags.Public | BindingFlags.Static);
+
+            Assert.That(method, Is.Not.Null);
+
+            var attributeData = method.GetCustomAttributesData()
+                .FirstOrDefault(attr => attr.AttributeType.FullName == "UnityEditor.MenuItem");
+
+            Assert.That(attributeData, Is.Not.Null);
+            Assert.That(attributeData.ConstructorArguments.Count, Is.GreaterThanOrEqualTo(1));
+            Assert.That(attributeData.ConstructorArguments[0].Value, Is.EqualTo("Tools/UnityCodeMcpServer/Restart Server"));
         }
 
         [Test]
