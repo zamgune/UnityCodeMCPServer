@@ -669,8 +669,16 @@ def main() -> None:
         help="Seconds to wait for a Unity file response before failing the request",
     )
 
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="Unity project root (directory containing Assets/). Required when the"
+        " bridge is not located inside the Unity project itself.",
+    )
+
     args = parser.parse_args()
-    asyncio.run(run_server(args.request_timeout))
+    asyncio.run(run_server(args.request_timeout, args.project_root))
 
 
 if __name__ == "__main__":

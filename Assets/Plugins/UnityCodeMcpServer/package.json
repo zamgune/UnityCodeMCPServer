@@ -13,8 +13,5 @@
     "ai"
   ],
   "license": "MIT",
-  "documentationUrl": "https://github.com/Signal-Loop/UnityCodeMCPServer",
-  "dependencies": {
-    "com.cysharp.unitask": "2.5.10"
-  }
+  "documentationUrl": "https://github.com/Signal-Loop/UnityCodeMCPServer"
 }
