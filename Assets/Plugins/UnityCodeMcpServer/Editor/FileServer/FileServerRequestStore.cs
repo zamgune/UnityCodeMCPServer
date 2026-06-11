@@ -26,6 +26,13 @@ namespace UnityCodeMcpServer.FileServer
 
     public sealed class FileServerRequestStore
     {
+        // A reload can kill the server between writing a temporary response file
+        // and moving it into place, and a crashed bridge leaves its request and
+        // response files behind. Both kinds of leftovers accumulate forever
+        // unless swept on server start.
+        private static readonly TimeSpan StaleMessageAge = TimeSpan.FromHours(1);
+        private static readonly TimeSpan StaleTempFileAge = TimeSpan.FromMinutes(5);
+
         private readonly string _messagesDirectory;
 
         public FileServerRequestStore(string messagesDirectory)
@@ -38,6 +45,36 @@ namespace UnityCodeMcpServer.FileServer
             Directory.CreateDirectory(_messagesDirectory);
             UnityCodeMcpServerLogger.Debug($"[FileServerRequestStore] Ensured messages directory path={_messagesDirectory}");
             return _messagesDirectory;
+        }
+
+        public void CleanupStaleFiles()
+        {
+            EnsureMessagesDirectory();
+            DateTime utcNow = DateTime.UtcNow;
+            DeleteFilesOlderThan("*.tmp", utcNow - StaleTempFileAge);
+            DeleteFilesOlderThan("*_request_*.json", utcNow - StaleMessageAge);
+            DeleteFilesOlderThan("*_response_*.json", utcNow - StaleMessageAge);
+        }
+
+        private void DeleteFilesOlderThan(string pattern, DateTime cutoffUtc)
+        {
+            foreach (string path in Directory.GetFiles(_messagesDirectory, pattern))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(path) >= cutoffUtc)
+                    {
+                        continue;
+                    }
+
+                    File.Delete(path);
+                    UnityCodeMcpServerLogger.Info($"[FileServerRequestStore] Deleted stale message file path={path}");
+                }
+                catch (IOException ex)
+                {
+                    UnityCodeMcpServerLogger.Warn($"[FileServerRequestStore] Failed to delete stale message file path={path} error={ex.Message}");
+                }
+            }
         }
 
         public bool TryGetNextPendingRequest(out FileServerRequestFile request)

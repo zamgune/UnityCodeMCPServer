@@ -104,6 +104,7 @@ namespace UnityCodeMcpServer.FileServer
                 _registry.DiscoverAndRegisterAll();
                 _messageHandler = new McpMessageHandler(_registry);
                 _requestStore = new FileServerRequestStore(messagesDirectory);
+                _requestStore.CleanupStaleFiles();
                 _serverCts = new CancellationTokenSource();
                 _watcher = CreateWatcher(messagesDirectory);
                 _watcher.EnableRaisingEvents = true;
