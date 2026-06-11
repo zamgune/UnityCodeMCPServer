@@ -5,6 +5,7 @@ using Cysharp.Threading.Tasks;
 using UnityCodeMcpServer.Handlers;
 using UnityCodeMcpServer.Helpers;
 using UnityCodeMcpServer.Registry;
+using UnityCodeMcpServer.Settings;
 using UnityEditor;
 using UnityEngine;
 
@@ -13,12 +14,18 @@ namespace UnityCodeMcpServer.FileServer
     [InitializeOnLoad]
     public static class UnityCodeMcpFileServer
     {
+        // FileSystemWatcher (Mono) can silently miss events, especially on macOS.
+        // A throttled rescan from EditorApplication.update guarantees pending
+        // requests are picked up even when no watcher event arrives.
+        private const double PollIntervalSeconds = 0.5;
+
         private static FileSystemWatcher _watcher;
         private static FileServerRequestStore _requestStore;
         private static McpRegistry _registry;
         private static McpMessageHandler _messageHandler;
         private static CancellationTokenSource _serverCts;
         private static int _isProcessing;
+        private static double _nextPollTime;
 
         static UnityCodeMcpFileServer()
         {
@@ -58,6 +65,7 @@ namespace UnityCodeMcpServer.FileServer
 
         private static void StopServer(string reason)
         {
+            EditorApplication.update -= OnEditorUpdate;
             _serverCts?.Cancel();
             _serverCts?.Dispose();
             _serverCts = null;
@@ -100,6 +108,9 @@ namespace UnityCodeMcpServer.FileServer
                 _watcher = CreateWatcher(messagesDirectory);
                 _watcher.EnableRaisingEvents = true;
 
+                _nextPollTime = 0;
+                EditorApplication.update += OnEditorUpdate;
+
                 ProcessAvailableRequestsAsync(_requestStore, _messageHandler, _serverCts.Token).Forget();
                 UnityCodeMcpServerLogger.Info($"[UnityCodeMcpFileServer] Server started directory={messagesDirectory} reason={reason}");
             }
@@ -132,6 +143,17 @@ namespace UnityCodeMcpServer.FileServer
             ProcessAvailableRequestsAsync(_requestStore, _messageHandler, _serverCts?.Token ?? CancellationToken.None).Forget();
         }
 
+        private static void OnEditorUpdate()
+        {
+            if (EditorApplication.timeSinceStartup < _nextPollTime)
+            {
+                return;
+            }
+
+            _nextPollTime = EditorApplication.timeSinceStartup + PollIntervalSeconds;
+            ProcessAvailableRequestsAsync(_requestStore, _messageHandler, _serverCts?.Token ?? CancellationToken.None).Forget();
+        }
+
         private static bool IsRequestFile(string path)
         {
             string fileName = Path.GetFileName(path);
@@ -156,10 +178,35 @@ namespace UnityCodeMcpServer.FileServer
                 return;
             }
 
+            bool deferred = false;
             try
             {
+                bool refreshAttempted = false;
                 while (!ct.IsCancellationRequested)
                 {
+                    await UniTask.SwitchToMainThread(ct);
+
+                    if (!refreshAttempted && requestStore.TryGetNextPendingRequest(out _))
+                    {
+                        refreshAttempted = true;
+                        if (RefreshAssetDatabaseIfIdle())
+                        {
+                            // A refresh-triggered compilation may not be visible to
+                            // isCompiling within the same frame, so yield one tick.
+                            await UniTask.Yield();
+                        }
+                    }
+
+                    if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+                    {
+                        // Leave pending request files on disk instead of answering with a
+                        // "retry while compiling" error; the post-reload rescan (or the next
+                        // poll tick) processes them against the freshly compiled assemblies.
+                        UnityCodeMcpServerLogger.Debug("[UnityCodeMcpFileServer] Deferring pending requests until compilation finishes");
+                        deferred = true;
+                        break;
+                    }
+
                     bool processed = await ProcessNextRequestAsync(requestStore, messageHandler, ct);
                     if (!processed)
                     {
@@ -179,7 +226,7 @@ namespace UnityCodeMcpServer.FileServer
             {
                 Interlocked.Exchange(ref _isProcessing, 0);
 
-                if (!ct.IsCancellationRequested && requestStore.TryGetNextPendingRequest(out _))
+                if (!deferred && !ct.IsCancellationRequested && requestStore.TryGetNextPendingRequest(out _))
                 {
                     UnityCodeMcpServerLogger.Debug("[UnityCodeMcpFileServer] Pending requests remain after processing loop, scheduling another pass");
                     ProcessAvailableRequestsAsync(requestStore, messageHandler, ct).Forget();
@@ -200,6 +247,28 @@ namespace UnityCodeMcpServer.FileServer
             watcher.Renamed += OnRequestFileRenamed;
             UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Created file watcher for directory={messagesDirectory}");
             return watcher;
+        }
+
+        // Unity only auto-refreshes the AssetDatabase when the editor window gains
+        // focus, so scripts edited by an external agent would otherwise stay
+        // uncompiled until the user clicks into Unity.
+        private static bool RefreshAssetDatabaseIfIdle()
+        {
+            if (!UnityCodeMcpServerSettings.Instance.AutoRefreshAssetsOnRequest)
+            {
+                return false;
+            }
+
+            if (EditorApplication.isPlayingOrWillChangePlaymode
+                || EditorApplication.isCompiling
+                || EditorApplication.isUpdating)
+            {
+                return false;
+            }
+
+            UnityCodeMcpServerLogger.Debug("[UnityCodeMcpFileServer] Refreshing AssetDatabase before processing requests");
+            AssetDatabase.Refresh();
+            return true;
         }
 
         private static string CreateMessagesDirectory(string projectRoot)

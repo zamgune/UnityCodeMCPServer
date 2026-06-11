@@ -58,6 +58,10 @@ namespace UnityCodeMcpServer.Settings
         [Tooltip("Enable logging to file (UnityCodeMcpServerLog.log in project root)")]
         public bool LogToFile = false;
 
+        [Header("File Server")]
+        [Tooltip("Refresh the AssetDatabase when a request arrives so externally edited scripts compile without the editor needing focus")]
+        public bool AutoRefreshAssetsOnRequest = true;
+
         [Header("Script Execution Assemblies")]
         [Tooltip("Additional assemblies to load for C# script execution (beyond default assemblies)")]
         public List<string> AdditionalAssemblyNames = new();
