@@ -1,5 +1,15 @@
 # Unity Code MCP Server
 
+> **This is a fork of [Signal-Loop/UnityCodeMCPServer](https://github.com/Signal-Loop/UnityCodeMCPServer)** with stability and workflow improvements:
+>
+> - **Domain-reload resilience** — a throttled polling fallback recovers requests that the `FileSystemWatcher` misses (frequent on macOS), so requests no longer hang until you manually refresh the editor.
+> - **Hands-free compilation** — incoming requests auto-trigger `AssetDatabase.Refresh()`, so scripts edited by an external agent compile without the editor needing focus (toggleable via `AutoRefreshAssetsOnRequest` in settings). While compiling, requests are deferred instead of rejected and are processed with the fresh assemblies after the reload.
+> - **Stale message cleanup** — orphaned `.tmp`/request/response files left by interrupted reloads or crashed bridges are swept on server start.
+> - **Vendored UniTask support** — the UPM dependency on `com.cysharp.unitask` was removed; any UniTask in the project (UPM package or a source copy in `Assets`) satisfies the by-name asmdef reference.
+> - **`--project-root` bridge option** — run the STDIO bridge from any location, not just inside the Unity project.
+> - **New agent skill: `building-unity-ui-from-html`** — a full workflow for faithfully converting HTML/CSS UI prototypes into uGUI, with a CSS-to-uGUI mapping reference and a rect-dump + screenshot verification loop.
+> - Removed an unused vendored `Unity.EditorCoroutines.Editor.dll` that collided with the official `com.unity.editorcoroutines` package.
+
 ### Search the live Unity project
 Inspect active scenes, components, assets, console output, settings, Play Mode state, and runtime values from an MCP client.
 ### Execute directly inside the Editor
@@ -106,7 +116,7 @@ graph LR
 
 1. Install `uv`:
    - Follow instructions at https://docs.astral.sh/uv/getting-started/installation
-2. Install UniTask in your Unity project. Open **Window > Package Manager**, click the **+** button, select **Add package from git URL...**, and enter:
+2. Install UniTask in your Unity project (skip this step if your project already contains UniTask, e.g. a source copy under `Assets` — the asmdef references it by name, so any copy works). Open **Window > Package Manager**, click the **+** button, select **Add package from git URL...**, and enter:
 
 ```
 https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask
@@ -115,8 +125,10 @@ https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask
 3. Install Unity Code MCP Server from Unity Package Manager. Open **Window > Package Manager**, click the **+** button, select **Add package from git URL...**, and enter:
 
 ```
-https://github.com/Signal-Loop/UnityCodeMCPServer.git?path=Assets/Plugins/UnityCodeMcpServer
+https://github.com/zamgune/UnityCodeMCPServer.git?path=Assets/Plugins/UnityCodeMcpServer
 ```
+
+   To pull the latest changes later, select the package in Package Manager and press **Update** (the commit hash is pinned in `Packages/packages-lock.json`).
 
 4. Configure the skill install location. Open **Tools/UnityCodeMcpServer/Show or Create Settings**, scroll to the **Skills** section, and confirm or change the install directory. By default, first-time installs target `.agents/skills/`. Skills are installed and updated automatically when the package is installed or updated.
 
@@ -133,6 +145,8 @@ Example configuration (using `uv` to run the bridge):
 
 The `unity-code-mcp-stdio` bridge forwards STDIO traffic to Unity through `.unityCodeMcpServer/messages`.
 
+When installed via Package Manager, the bridge is automatically copied (and kept in sync on every package update) to `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~` in your project, so point your MCP client there:
+
 ```json
 {
   "servers": {
@@ -147,6 +161,12 @@ The `unity-code-mcp-stdio` bridge forwards STDIO traffic to Unity through `.unit
     }
   }
 }
+```
+
+To run the bridge from a location outside the Unity project (e.g. a shared checkout), pass the project explicitly:
+
+```
+unity-code-mcp-stdio --project-root /path/to/UnityProject
 ```
 
 ### Server configuration (Unity)
@@ -166,6 +186,12 @@ The file-backed transport exchanges request and response files through `.unityCo
 ## Agent skills
 
 Unity Code MCP Server ships a set of **AI agent skill files** (Markdown documents that teach your agent how to use the server's tools effectively). These skills are installed automatically into the configured target directory whenever the package is installed or updated.
+
+Bundled skills:
+
+- `executing-csharp-scripts-in-unity-editor` — patterns for safe, effective C# script execution
+- `unity-game-player` — closed-loop autonomous game playing (sense → compute → act)
+- `building-unity-ui-from-html` — convert HTML/CSS UI prototypes into faithful uGUI implementations (fork addition)
 
 ### Installing skills
 
