@@ -291,11 +291,20 @@ namespace UnityCodeMcpServer.FileServer
 
             ct.ThrowIfCancellationRequested();
             UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Processing request file request={request.RequestPath}");
-            string requestJson = await ReadRequestAsync(request.RequestPath, ct);
-            string responseJson = await ProcessRequestJsonAsync(messageHandler, requestJson, ct);
+
+            // Read/write message files synchronously on the main thread. The async file
+            // APIs hop to thread-pool threads whose continuations stall when macOS
+            // backgrounds the editor (App Nap throttles background threads), so requests
+            // issued while the editor is unfocused would hang even though the editor main
+            // thread keeps ticking. The message files are tiny, so synchronous I/O on the
+            // main thread is effectively free.
+            await UniTask.SwitchToMainThread(ct);
+            string requestJson = File.ReadAllText(request.RequestPath);
+            string responseJson = await messageHandler.ProcessMessageAsync(requestJson);
+            await UniTask.SwitchToMainThread(ct);
             if (responseJson != null)
             {
-                await WriteAllTextAtomicallyAsync(request.ResponsePath, responseJson, request.RequestPath, ct);
+                WriteAllTextAtomically(request.ResponsePath, responseJson, request.RequestPath);
                 UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Wrote response file response={request.ResponsePath}");
             }
             else
@@ -305,22 +314,6 @@ namespace UnityCodeMcpServer.FileServer
             }
 
             return true;
-        }
-
-        private static async UniTask<string> ReadRequestAsync(
-            string requestPath,
-            CancellationToken ct)
-        {
-            return await File.ReadAllTextAsync(requestPath, ct);
-        }
-
-        private static async UniTask<string> ProcessRequestJsonAsync(
-            McpMessageHandler messageHandler,
-            string requestJson,
-            CancellationToken ct)
-        {
-            await UniTask.SwitchToMainThread(ct);
-            return await messageHandler.ProcessMessageAsync(requestJson);
         }
 
         private static void DeleteRequestFile(string requestPath)
@@ -334,11 +327,10 @@ namespace UnityCodeMcpServer.FileServer
             UnityCodeMcpServerLogger.Debug($"[UnityCodeMcpFileServer] Deleted request file request={requestPath}");
         }
 
-        private static async UniTask WriteAllTextAtomicallyAsync(
+        private static void WriteAllTextAtomically(
             string path,
             string content,
-            string requestPath,
-            CancellationToken ct)
+            string requestPath)
         {
             string temporaryPath = Path.Combine(
                 Path.GetDirectoryName(path) ?? string.Empty,
@@ -346,7 +338,7 @@ namespace UnityCodeMcpServer.FileServer
 
             try
             {
-                await File.WriteAllTextAsync(temporaryPath, content, ct);
+                File.WriteAllText(temporaryPath, content);
 
                 if (File.Exists(path))
                 {
