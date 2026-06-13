@@ -40,6 +40,11 @@ LOG_VALUE_PREVIEW_LIMIT = 160
 REQUEST_UNAVAILABLE_ERROR_CODE = -32000
 DEFAULT_FILE_REQUEST_TIMEOUT = 180.0
 RESPONSE_POLL_INTERVAL_SECONDS = 0.1
+# Capability-listing calls (tools/prompts/resources) happen during the MCP
+# handshake. They must fail fast when Unity is closed or busy, otherwise the
+# client's startup times out and the server never registers. Tool lists are
+# served from a cache when Unity is unavailable so the server still appears.
+LIST_OPERATION_TIMEOUT = 8.0
 
 formatter = logging.Formatter(
     "%(asctime)s - pid=%(process)d - %(levelname)s - %(message)s"
@@ -220,8 +225,8 @@ class UnityFileClient(UnityBridgeClient):
     async def disconnect(self, reason: str = "manual") -> None:
         logger.info("File bridge reset reason=%s", reason)
 
-    async def _wait_for_response(self, response_path: Path) -> None:
-        with anyio.fail_after(self.request_timeout):
+    async def _wait_for_response(self, response_path: Path, timeout: float) -> None:
+        with anyio.fail_after(timeout):
             while not response_path.exists():
                 logger.debug(
                     "Waiting for Unity file response response=%s",
@@ -229,7 +234,10 @@ class UnityFileClient(UnityBridgeClient):
                 )
                 await anyio.sleep(self.response_poll_interval)
 
-    async def send_request(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+    async def send_request(
+        self, request_payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
+        effective_timeout = self.request_timeout if timeout is None else timeout
         trace_id = _next_request_trace_id()
         request_summary = _describe_request(request_payload)
 
@@ -256,7 +264,7 @@ class UnityFileClient(UnityBridgeClient):
             )
 
             try:
-                await self._wait_for_response(response_path)
+                await self._wait_for_response(response_path, effective_timeout)
                 logger.debug(
                     "trace=%s Unity file response detected response=%s",
                     trace_id,
@@ -274,7 +282,7 @@ class UnityFileClient(UnityBridgeClient):
                 return self._build_error(
                     request_payload,
                     REQUEST_UNAVAILABLE_ERROR_CODE,
-                    f"Timed out waiting for Unity file response after {self.request_timeout} seconds",
+                    f"Timed out waiting for Unity file response after {effective_timeout} seconds",
                 )
             except json.JSONDecodeError as exc:
                 logger.error(
@@ -393,27 +401,68 @@ async def _build_call_tool_result(
     )
 
 
+def _tools_cache_path(unity_client: UnityBridgeClient) -> Path | None:
+    """Location of the on-disk tool-list cache, or None if unknown."""
+    paths = getattr(unity_client, "paths", None)
+    project_root = getattr(paths, "project_root", None)
+    if project_root is None:
+        return None
+    return Path(project_root) / ".unityCodeMcpServer" / "tools-cache.json"
+
+
+def _read_cached_tools(cache_path: Path | None) -> list[dict[str, Any]]:
+    if cache_path is None or not cache_path.exists():
+        return []
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read tool cache %s: %s", cache_path, exc)
+        return []
+
+
+def _write_cached_tools(cache_path: Path | None, tools: list[dict[str, Any]]) -> None:
+    if cache_path is None or not tools:
+        return
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(tools), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Failed to write tool cache %s: %s", cache_path, exc)
+
+
 def create_server(unity_client: UnityBridgeClient) -> Server:
     """Create MCP server that proxies requests to Unity."""
     server = Server("unity-code-mcp-stdio")
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
+        # Use a short timeout: this runs during the MCP handshake and must not
+        # block startup when Unity is closed or mid-reload. On success, cache the
+        # list so we can still advertise tools (letting the server register and
+        # tool calls work once Unity comes up) when Unity is unavailable.
         response = await unity_client.send_request(
             {
                 "jsonrpc": "2.0",
                 "id": "list_tools",
                 "method": "tools/list",
                 "params": {},
-            }
+            },
+            timeout=LIST_OPERATION_TIMEOUT,
         )
 
-        if "error" in response:
-            logger.error("Error listing tools: %s", response["error"])
-            return []
+        cache_path = _tools_cache_path(unity_client)
 
-        result = response.get("result", {})
-        tools = result.get("tools", [])
+        if "error" in response:
+            logger.warning(
+                "Unity unavailable for tools/list (%s); falling back to cached tool list",
+                response["error"].get("message", "unknown error"),
+            )
+            tools = _read_cached_tools(cache_path)
+        else:
+            tools = response.get("result", {}).get("tools", [])
+            _write_cached_tools(cache_path, tools)
+
         return [
             types.Tool(
                 name=tool["name"],
@@ -435,7 +484,8 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
                 "id": "list_prompts",
                 "method": "prompts/list",
                 "params": {},
-            }
+            },
+            timeout=LIST_OPERATION_TIMEOUT,
         )
 
         if "error" in response:
@@ -504,7 +554,8 @@ def create_server(unity_client: UnityBridgeClient) -> Server:
                 "id": "list_resources",
                 "method": "resources/list",
                 "params": {},
-            }
+            },
+            timeout=LIST_OPERATION_TIMEOUT,
         )
 
         if "error" in response:
