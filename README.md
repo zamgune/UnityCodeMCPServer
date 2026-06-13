@@ -176,6 +176,19 @@ unity-code-mcp-stdio --project-root /path/to/UnityProject
 
 The file-backed transport exchanges request and response files through `.unityCodeMcpServer/messages` in the Unity project root.
 
+#### Reliability settings (fork additions)
+
+Both default to **on**; a fresh install gets the correct defaults automatically.
+
+- **Auto Refresh Assets On Request** (`AutoRefreshAssetsOnRequest`) — refreshes the AssetDatabase when a request arrives so externally edited scripts compile without the editor needing focus.
+- **Run In Background During Play Mode** (`RunInBackgroundDuringPlayMode`) — sets `Application.runInBackground` on entering Play Mode so requests from an unfocused editor (e.g. an agent in a terminal) are serviced instead of hanging. Runtime-only; does not change PlayerSettings or builds.
+
+> **Upgrading from an older version?** A settings asset created before these fields existed deserializes the missing booleans to `false`, silently disabling the features. Open the settings and confirm both toggles are on (or add `AutoRefreshAssetsOnRequest: 1` and `RunInBackgroundDuringPlayMode: 1` to the `.asset` directly). Fresh installs are unaffected.
+
+#### Using two Unity projects at once
+
+The transport is fully project-isolated (each editor watches its own `.unityCodeMcpServer/messages`, each bridge resolves its own project root), so multiple editors can run simultaneously. The one thing to make unique is the **MCP server name** in each client config — if both projects register a server under the same name, the client cannot tell them apart and routes everything to one bridge. Give each project a distinct name, e.g. `unity-projectA` / `unity-projectB`, and run a separate agent session per project.
+
 ### Menu commands
 
 #### General

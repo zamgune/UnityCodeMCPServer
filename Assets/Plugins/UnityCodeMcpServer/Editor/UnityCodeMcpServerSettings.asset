@@ -14,6 +14,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: UnityCodeMcpServer::UnityCodeMcpServer.Settings.UnityCodeMcpServerSettings
   MinLogLevel: 2
   LogToFile: 1
+  AutoRefreshAssetsOnRequest: 1
+  RunInBackgroundDuringPlayMode: 1
   AdditionalAssemblyNames:
   - Newtonsoft.Json
   InputActionsAssetPath: 
