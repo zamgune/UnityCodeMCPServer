@@ -62,6 +62,9 @@ namespace UnityCodeMcpServer.Settings
         [Tooltip("Refresh the AssetDatabase when a request arrives so externally edited scripts compile without the editor needing focus")]
         public bool AutoRefreshAssetsOnRequest = true;
 
+        [Tooltip("Enable Application.runInBackground when entering Play Mode so MCP requests are serviced while the editor is unfocused. Runtime-only; does not change PlayerSettings or builds.")]
+        public bool RunInBackgroundDuringPlayMode = true;
+
         [Header("Script Execution Assemblies")]
         [Tooltip("Additional assemblies to load for C# script execution (beyond default assemblies)")]
         public List<string> AdditionalAssemblyNames = new();
