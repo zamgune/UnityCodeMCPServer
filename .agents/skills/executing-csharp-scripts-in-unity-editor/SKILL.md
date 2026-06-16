@@ -12,9 +12,10 @@ description: Use this skill always when you need to use execute_csharp_script_in
 3. Forbidden Patterns
 4. Usage Workflow
 5. Debugging Loop
-6. Favourite Scripts
-7. Script Context and APIs
-8. Common Scripting Patterns
+6. Compilation & Domain Reload Discipline
+7. Favourite Scripts
+8. Script Context and APIs
+9. Common Scripting Patterns
 
 ---
 
@@ -83,6 +84,45 @@ When a script execution returns errors or unexpected results:
 3. Otherwise, identify the root cause from the script output: missing object, bad asset path, wrong API usage, or null reference.
 4. Fix the script and re-execute.
 5. Repeat until the tool result confirms success with no errors.
+
+---
+
+## Compilation & Domain Reload Discipline
+
+Editing C# source files triggers a recompile and an AppDomain reload inside the Unity Editor. The MCP bridge handles this transparently, but it changes the **timing** of tool calls, and mishandling that timing is the single most common cause of spurious timeouts.
+
+### What the bridge does during a reload
+
+- A request that arrives while the editor is **compiling or reloading is not answered with an error.** The server leaves it pending on disk and answers it **after** the fresh assemblies finish loading.
+- Therefore a single `execute_csharp_script_in_unity_editor`, `run_unity_tests`, or `read_unity_console_logs` call issued right after a source edit can legitimately block for the **entire compile + reload** — often tens of seconds, and minutes on a large project. **This is expected, not a hang.**
+- The bridge is single-flight: it processes one request at a time and resumes pending requests after the reload. Firing duplicates does not make it faster — it only piles up work.
+
+### Rules
+
+1. **One call, then wait.** After editing C# source, issue **one** tool call and let it ride out the reload. Do **not** cancel and re-issue the same call because it "seems slow." Duplicate requests confuse the single-flight bridge and waste the timeout budget.
+2. **The client tool-call timeout must exceed the reload time.** Most MCP clients abort a tool call after a per-call timeout (commonly **60s by default**), which is shorter than a full recompile. When that fires, the client gives up *before* Unity answers, even though the bridge would have waited. Raise the client's per-tool timeout to **at least the bridge's `--request-timeout`** (180s+). See _Client timeout configuration_ below.
+3. **On a "compiling" or "compiler errors" result, do not spam-retry.** If a call returns `Cannot ... while the editor is compiling` or `Cannot ... while the project has compiler errors`, **stop.** Call `read_unity_console_logs` (max_entries: 30), fix the offending source file, and only then re-issue. Re-firing the same call against a red build returns the same error every time and burns the timeout budget.
+4. **Verify in order:** console clean → `run_unity_tests` → (only if runtime behavior matters) play mode. Never run tests while the build is red.
+
+### Client timeout configuration
+
+Register the Unity MCP with a per-tool timeout **>= the bridge `--request-timeout`**, and a startup timeout large enough that Unity can be mid-reload when the bridge connects.
+
+For Codex (`~/.codex/config.toml`, or the per-project Codex config where the Unity MCP is registered):
+
+```toml
+[mcp_servers.unity]
+command = "uv"
+args = [
+  "run", "--directory",
+  "<UnityProject>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~",
+  "unity-code-mcp-stdio", "--request-timeout", "240",
+]
+startup_timeout_sec = 60   # Unity may be compiling/reloading when the bridge connects
+tool_timeout_sec = 300     # MUST be >= --request-timeout, or Codex aborts mid-reload (default 60s is too low)
+```
+
+The rule generalizes to any client: keep `client per-tool timeout >= bridge --request-timeout`.
 
 ---
 
