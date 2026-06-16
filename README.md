@@ -85,6 +85,37 @@ To run the bridge from outside the project, pass `--project-root /path/to/UnityP
 
 During a recompile/domain reload the bridge **defers** the request and answers it after the fresh assemblies load — a single call can legitimately block for the whole reload. Keep the **client's per-tool timeout ≥ the bridge `--request-timeout`**. Codex's `tool_timeout_sec` defaults to 60s (too low) — set `tool_timeout_sec = 300` and `startup_timeout_sec = 60` in its `[mcp_servers.*]` block.
 
+### Cross-platform (one committed config for macOS + Windows)
+
+The absolute `--directory` path differs per machine, but the part *below the project root* is identical everywhere. To keep a single committed config that works on both OSes, make the bridge path **project-relative** instead of absolute:
+
+- **Claude Code** — commit a project `.mcp.json` and use the `${CLAUDE_PROJECT_DIR:-.}` placeholder (Claude Code injects `CLAUDE_PROJECT_DIR` = project root into the server's environment):
+
+  ```json
+  {
+    "mcpServers": {
+      "unity": {
+        "command": "uv",
+        "args": ["run", "--directory", "${CLAUDE_PROJECT_DIR:-.}/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~", "unity-code-mcp-stdio", "--request-timeout", "240"]
+      }
+    }
+  }
+  ```
+
+  Editing `.mcp.json` requires re-approving the server once per machine in the `claude` TUI. (If your Unity project lives in a subfolder, prefix the relative path with it, e.g. `${CLAUDE_PROJECT_DIR:-.}/MyUnityApp/Assets/...`.)
+
+- **Codex** — `config.toml` does **not** expand variables in `args`, so use a **relative** `--directory` (resolved from the project root Codex launches in):
+
+  ```toml
+  [mcp_servers.unity]
+  command = "uv"
+  args = ["run", "--directory", "Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~", "unity-code-mcp-stdio", "--request-timeout", "240"]
+  startup_timeout_sec = 60
+  tool_timeout_sec = 300
+  ```
+
+  Forward slashes work on Windows too. Alternatively, register Codex servers in the per-machine `~/.codex/config.toml` with an absolute path — that file isn't shared across machines, so it sidesteps the problem.
+
 ### Using two projects at once
 
 The transport is fully project-isolated, so multiple editors can run at once. Give each project a **distinct MCP server name** (e.g. `unity_projectA` / `unity_projectB`); a shared name routes everything to one bridge.
