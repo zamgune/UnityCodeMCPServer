@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using Cysharp.Threading.Tasks;
@@ -18,6 +19,18 @@ namespace UnityCodeMcpServer.FileServer
         // A throttled rescan from EditorApplication.update guarantees pending
         // requests are picked up even when no watcher event arrives.
         private const double PollIntervalSeconds = 0.5;
+
+        public static bool IsServerRunning => _watcher != null;
+        public static DateTime? LastRequestUtc
+        {
+            get
+            {
+                var s = SessionState.GetString("UnityCodeMcpServer.LastRequestUtcTicks", string.Empty);
+                return long.TryParse(s, out var t) && t >= DateTime.MinValue.Ticks && t <= DateTime.MaxValue.Ticks
+                    ? new DateTime(t, DateTimeKind.Utc)
+                    : (DateTime?)null;
+            }
+        }
 
         private static FileSystemWatcher _watcher;
         private static FileServerRequestStore _requestStore;
@@ -300,6 +313,7 @@ namespace UnityCodeMcpServer.FileServer
             // main thread is effectively free.
             await UniTask.SwitchToMainThread(ct);
             string requestJson = File.ReadAllText(request.RequestPath);
+            SessionState.SetString("UnityCodeMcpServer.LastRequestUtcTicks", DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture));
             string responseJson = await messageHandler.ProcessMessageAsync(requestJson);
             await UniTask.SwitchToMainThread(ct);
             if (responseJson != null)

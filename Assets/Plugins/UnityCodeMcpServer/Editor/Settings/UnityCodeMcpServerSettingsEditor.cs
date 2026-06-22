@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using UnityCodeMcpServer.Editor.Installer;
+using UnityCodeMcpServer.FileServer;
 using UnityCodeMcpServer.Helpers;
 using UnityEditor;
 using UnityEditor.IMGUI.Controls;
@@ -23,6 +24,7 @@ namespace UnityCodeMcpServer.Settings.Editor
         // ── Assembly selector state ───────────────────────────────────────────
         private readonly AdvancedDropdownState _assemblyDropdownState = new();
         private string[] _availableAssemblyNames;
+        private bool _showSetupAndStatus = true;
         private bool _showDefaultAssemblies = true;
         private bool _showAdditionalAssemblies = true;
 
@@ -31,11 +33,16 @@ namespace UnityCodeMcpServer.Settings.Editor
             RefreshAvailableAssemblies();
         }
 
+        public override bool RequiresConstantRepaint() => true;
+
         public override void OnInspectorGUI()
         {
             UnityCodeMcpServerSettings settings = (UnityCodeMcpServerSettings)target;
             bool wasDirtyBeforeGui = EditorUtility.IsDirty(settings);
             serializedObject.Update();
+
+            DrawSetupAndStatusSection();
+            EditorGUILayout.Space();
 
             DrawPropertiesExcluding(serializedObject, "m_Script", "AdditionalAssemblyNames", "InputActionsAssetPath", "SkillsInstallTarget", "SkillsTargetPath");
 
@@ -137,6 +144,88 @@ namespace UnityCodeMcpServer.Settings.Editor
             {
                 EditorUtility.SetDirty(settings);
                 AssetDatabase.SaveAssetIfDirty(settings);
+            }
+        }
+
+        private static string FormatTimeAgo(DateTime utc)
+        {
+            TimeSpan elapsed = DateTime.UtcNow - utc;
+            if (elapsed.TotalSeconds < 0)
+            {
+                elapsed = TimeSpan.Zero;
+            }
+
+            if (elapsed.TotalMinutes < 1)
+            {
+                return $"{(int)elapsed.TotalSeconds}s ago";
+            }
+
+            if (elapsed.TotalHours < 1)
+            {
+                return $"{(int)elapsed.TotalMinutes}m ago";
+            }
+
+            return $"{(int)elapsed.TotalHours}h ago";
+        }
+
+        private void DrawSetupAndStatusSection()
+        {
+            _showSetupAndStatus = EditorGUILayout.Foldout(_showSetupAndStatus, "Setup & Status", true);
+            if (!_showSetupAndStatus)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Server:", GUILayout.Width(140));
+            EditorGUILayout.LabelField(UnityCodeMcpFileServer.IsServerRunning ? "Running" : "Stopped");
+            if (GUILayout.Button("Restart", GUILayout.Width(70)))
+            {
+                UnityCodeMcpFileServer.RestartServer();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            DateTime? lastRequestUtc = UnityCodeMcpFileServer.LastRequestUtc;
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Last client request:", GUILayout.Width(140));
+            Color oldColor = GUI.color;
+            if (lastRequestUtc.HasValue)
+            {
+                GUI.color = DateTime.UtcNow - lastRequestUtc.Value < TimeSpan.FromSeconds(15) ? Color.green : Color.grey;
+                EditorGUILayout.LabelField(FormatTimeAgo(lastRequestUtc.Value));
+            }
+            else
+            {
+                GUI.color = Color.grey;
+                EditorGUILayout.LabelField("none this session");
+            }
+            GUI.color = oldColor;
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.HelpBox(
+                "Status reflects file-transport traffic from the MCP client bridge. Running means Unity is listening; a recent request means a client is connected. With Unity open, restart your MCP client if no requests arrive.",
+                MessageType.Info);
+
+            DrawCopyBlock("Claude Code", UnityCodeMcpServerSettings.BuildClaudeCodeAddCommand());
+            DrawCopyBlock("Codex (~/.codex/config.toml)", UnityCodeMcpServerSettings.BuildCodexConfigToml());
+            DrawCopyBlock("Generic JSON", UnityCodeMcpServerSettings.BuildStdioMcpConfiguration());
+
+            EditorGUI.indentLevel--;
+        }
+
+        private static void DrawCopyBlock(string label, string value)
+        {
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            using (new EditorGUI.DisabledScope(true))
+            {
+                EditorGUILayout.TextArea(value, EditorStyles.textArea);
+            }
+
+            if (GUILayout.Button("Copy"))
+            {
+                EditorGUIUtility.systemCopyBuffer = value;
             }
         }
 

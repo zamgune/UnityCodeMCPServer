@@ -362,7 +362,7 @@ namespace UnityCodeMcpServer.Settings
 
         public static string BuildStdioMcpConfiguration()
         {
-            string pathToStdio = Path.GetFullPath("Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~").Replace("\\", "/");
+            string pathToStdio = GetStdioPath();
 
             return $@"{{
     ""servers"": {{
@@ -377,6 +377,42 @@ namespace UnityCodeMcpServer.Settings
         }}
     }}
 }}";
+        }
+
+        public static string GetSuggestedServerName()
+        {
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, "..")).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string folderName = Path.GetFileName(projectRoot).ToLowerInvariant();
+            char[] chars = folderName.ToCharArray();
+
+            for (int i = 0; i < chars.Length; i++)
+            {
+                char c = chars[i];
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+                {
+                    chars[i] = '_';
+                }
+            }
+
+            string sanitized = new(chars);
+            return string.IsNullOrEmpty(sanitized) ? "unity" : "unity_" + sanitized;
+        }
+
+        public static string BuildClaudeCodeAddCommand()
+        {
+            return $"claude mcp add {GetSuggestedServerName()} -s local -- uv run --directory \"{GetStdioPath()}\" unity-code-mcp-stdio --request-timeout 240";
+        }
+
+        public static string BuildCodexConfigToml()
+        {
+            string pathToStdio = GetStdioPath();
+            string serverName = GetSuggestedServerName();
+
+            return $@"[mcp_servers.{serverName}]
+command = ""uv""
+args = [""run"", ""--directory"", ""{pathToStdio}"", ""unity-code-mcp-stdio"", ""--request-timeout"", ""240""]
+startup_timeout_sec = 60
+tool_timeout_sec = 300";
         }
 
         public static UnityCodeMcpServerSettings GetOrCreateSettingsAsset()
@@ -446,6 +482,11 @@ namespace UnityCodeMcpServer.Settings
         private static string NormalizePath(string path)
         {
             return path.Replace("\\", "/");
+        }
+
+        private static string GetStdioPath()
+        {
+            return Path.GetFullPath("Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~").Replace("\\", "/");
         }
     }
 }

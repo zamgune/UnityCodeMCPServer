@@ -120,6 +120,10 @@ The absolute `--directory` path differs per machine, but the part *below the pro
 
 The transport is fully project-isolated, so multiple editors can run at once. Give each project a **distinct MCP server name** (e.g. `unity_projectA` / `unity_projectB`); a shared name routes everything to one bridge.
 
+### In-Editor Setup & Status panel
+
+Open **Tools/UnityCodeMcpServer/Show or Create Settings** (it also opens automatically the first time the package is installed). The **Setup & Status** section at the top shows whether the server is listening (`Running`/`Stopped`, with a **Restart** button) and when a client last sent a request — the in-Unity confirmation that the transport works. It also gives **copy-ready config** for **Claude Code**, **Codex**, and a **generic JSON** client, each pre-filled with this machine's resolved `STDIO~` path so you don't have to assemble the absolute path by hand.
+
 ### Reliability settings (Unity)
 
 Open **Tools/UnityCodeMcpServer/Show or Create Settings**. Both default **on**:

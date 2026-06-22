@@ -1,6 +1,7 @@
 ﻿using System.IO;
 using UnityCodeMcpServer.Helpers;
 using UnityEditor;
+using UnityEngine;
 
 namespace UnityCodeMcpServer.Editor.Installer
 {
@@ -47,6 +48,16 @@ namespace UnityCodeMcpServer.Editor.Installer
             bool anyChanges = RunInstallers(
                 () => packageInstaller.Install(packageRoot),
                 () => skillsInstaller.InstallConfiguredSkills());
+
+            if (!Application.isBatchMode)
+            {
+                string key = "UnityCodeMcpServer.SetupShown." + Path.GetFullPath(".");
+                if (!EditorPrefs.GetBool(key, false))
+                {
+                    EditorPrefs.SetBool(key, true);
+                    EditorApplication.delayCall += () => UnityCodeMcpServer.Settings.UnityCodeMcpServerSettings.ShowSettings();
+                }
+            }
 
             UnityCodeMcpServerLogger.Debug($"[PackageInit] Install steps completed. Changes applied: {anyChanges}");
         }
