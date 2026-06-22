@@ -26,7 +26,9 @@ namespace UnityCodeMcpServer.FileServer
             get
             {
                 var s = SessionState.GetString("UnityCodeMcpServer.LastRequestUtcTicks", string.Empty);
-                return long.TryParse(s, out var t) ? new DateTime(t, DateTimeKind.Utc) : (DateTime?)null;
+                return long.TryParse(s, out var t) && t >= DateTime.MinValue.Ticks && t <= DateTime.MaxValue.Ticks
+                    ? new DateTime(t, DateTimeKind.Utc)
+                    : (DateTime?)null;
             }
         }
 
