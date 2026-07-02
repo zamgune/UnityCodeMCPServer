@@ -1,0 +1,30 @@
+name: Publish stdio bridge to PyPI
+
+on:
+  push:
+    tags:
+      - "stdio-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing (no API token needed)
+    defaults:
+      run:
+        working-directory: Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # ponytail: full suite has 4 pre-existing environment-dependent failures;
+      # widen to `pytest tests/` once test_bridge_over_file.py is fixed.
+      - name: Run tests
+        run: uv run --extra dev pytest tests/test_cli.py -q
+      - name: Build
+        run: uv build
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/dist

@@ -4,8 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unity-code-mcp-stdio"
-version = "0.4.27-preview"
+# Keep in lockstep with the UPM package version in ../../package.json.
+version = "0.6.0"
 description = "MCP STDIO Bridge for Unity Code MCP Server - a powerful MCP server for the Unity Editor that gives AI Agents ability to perform any action using Unity Editor API. This includes scripts, scenes, prefabs and assets manipulation, configuration changes, and more."
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
@@ -25,6 +27,10 @@ dependencies = [
     "mcp>=1.26.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/zamgune/UnityCodeMCPServer"
+Repository = "https://github.com/zamgune/UnityCodeMCPServer"
+
 [project.scripts]
 unity-code-mcp-stdio = "unity_code_mcp_stdio:main"
 unity-code = "unity_code_mcp_stdio.cli:main"
@@ -40,5 +46,6 @@ packages = ["src/unity_code_mcp_stdio"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/unity_code_mcp_stdio"
+    "src/unity_code_mcp_stdio",
+    "README.md"
 ]

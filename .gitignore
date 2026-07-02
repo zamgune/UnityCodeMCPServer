@@ -78,7 +78,11 @@ crashlytics-build.properties
 
 *.pyc
 .vscode/
-.github/
+# Auto-installed agent skills; keep .github/workflows/ committed
+.github/skills/
 Dev/Python/.python-version
 UnityCodeMcpServerLog.log
 .mcp.json
+
+# MCP file-transport runtime messages
+.unityCodeMcpServer/messages/
