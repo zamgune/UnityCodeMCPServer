@@ -323,6 +323,51 @@ if (target != null) {
 }
 ```
 
+### Executing a Menu Item
+
+Any Unity menu entry can be invoked by its path. Returns `false` when the path does not exist (check the exact spelling in the menu bar). Never execute `File/Quit`.
+
+```csharp
+bool executed = UnityEditor.EditorApplication.ExecuteMenuItem("File/Save Project");
+UnityEngine.Debug.Log("Menu executed: " + executed);
+```
+
+### Editing Assets as YAML Text, Then Validating
+
+`.prefab`, `.unity`, `.asset`, and `.mat` files are YAML and can be edited directly with file tools — often faster than scripting the change. Always validate afterwards:
+
+1. Edit the file with file tools.
+2. Run `UnityEditor.AssetDatabase.Refresh();` and read the console logs — a broken file logs an import error.
+3. Reserialize so Unity rewrites the file in canonical form (fixes formatting drift, confirms the asset loads):
+
+```csharp
+UnityEditor.AssetDatabase.Refresh();
+UnityEditor.AssetDatabase.ForceReserializeAssets(new[] { "Assets/Prefabs/Player.prefab" });
+UnityEngine.Debug.Log("Reserialized OK");
+```
+
+If the reserialized diff reverts your edit, the field name or structure was wrong — inspect the rewritten file to see the canonical layout.
+
+### Dumping Profiler Timings
+
+Requires the Profiler to be recording (`ProfilerDriver.enabled = true`, then play for a few frames). Dumps the top-level hierarchy of the last captured frame:
+
+```csharp
+using UnityEditor.Profiling;
+var frame = UnityEditorInternal.ProfilerDriver.lastFrameIndex;
+if (frame < 0) { UnityEngine.Debug.LogError("No profiler frames captured — enable ProfilerDriver.enabled and run Play Mode first"); return; }
+using (var view = UnityEditorInternal.ProfilerDriver.GetHierarchyFrameDataView(
+    frame, 0, HierarchyFrameDataView.ViewModes.Default, HierarchyFrameDataView.columnTotalTime, false)) {
+    var children = new System.Collections.Generic.List<int>();
+    view.GetItemChildren(view.GetRootItemID(), children);
+    foreach (int id in children) {
+        UnityEngine.Debug.Log($"{view.GetItemName(id)} | total {view.GetItemColumnDataAsFloat(id, HierarchyFrameDataView.columnTotalTime):F2}ms | self {view.GetItemColumnDataAsFloat(id, HierarchyFrameDataView.columnSelfTime):F2}ms");
+    }
+}
+```
+
+Drill into a hot item by calling `GetItemChildren` again with its id.
+
 ### Missing Namespace or Assembly Errors
 
 When encountering errors about missing types or namespaces, like `error CS0234: The type or namespace name 'UI' does not exist in the namespace 'UnityEngine' (are you missing an assembly reference?)`:
