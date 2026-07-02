@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 
 [[package]]
@@ -850,7 +850,7 @@ wheels = [
 
 [[package]]
 name = "unity-code-mcp-stdio"
-version = "0.4.27rc0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
