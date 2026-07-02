@@ -29,6 +29,10 @@ namespace UnityCodeMcpServer.Tests.EditMode
             Assert.IsTrue(schema.TryGetProperty("properties", out JsonElement properties));
             Assert.IsTrue(properties.TryGetProperty("max_entries", out JsonElement maxEntries));
             Assert.AreEqual(JsonValueKind.Object, maxEntries.ValueKind);
+            Assert.IsTrue(properties.TryGetProperty("severities", out JsonElement severities));
+            Assert.AreEqual(JsonValueKind.Object, severities.ValueKind);
+            Assert.IsTrue(properties.TryGetProperty("message_contains", out JsonElement messageContains));
+            Assert.AreEqual(JsonValueKind.Object, messageContains.ValueKind);
         }
 
         [Test]
@@ -78,6 +82,90 @@ namespace UnityCodeMcpServer.Tests.EditMode
             tool.Execute(args);
 
             Assert.AreEqual(200, capturedLimit);
+        }
+
+        [Test]
+        public void Execute_FiltersBySeverity()
+        {
+            ReadUnityConsoleLogsTool tool = CreateToolWithEntries(
+                new UnityConsoleLogEntry("plain alpha", null, UnityConsoleLogSeverity.Info),
+                new UnityConsoleLogEntry("warning bravo", null, UnityConsoleLogSeverity.Warning),
+                new UnityConsoleLogEntry("error charlie", null, UnityConsoleLogSeverity.Error));
+
+            ToolsCallResult result = tool.Execute(JsonHelper.ParseElement(@"{""severities"": [""warning""]}"));
+            string text = result.Content[0].Text;
+
+            Assert.IsFalse(result.IsError);
+            StringAssert.Contains("warning bravo", text);
+            StringAssert.DoesNotContain("plain alpha", text);
+            StringAssert.DoesNotContain("error charlie", text);
+        }
+
+        [Test]
+        public void Execute_FiltersByMessageContains_CaseInsensitive()
+        {
+            ReadUnityConsoleLogsTool tool = CreateToolWithEntries(
+                new UnityConsoleLogEntry("alpha needle", null, UnityConsoleLogSeverity.Info),
+                new UnityConsoleLogEntry("bravo outside", null, UnityConsoleLogSeverity.Info),
+                new UnityConsoleLogEntry("charlie NEEDLE", null, UnityConsoleLogSeverity.Warning));
+
+            ToolsCallResult result = tool.Execute(JsonHelper.ParseElement(@"{""message_contains"": ""NeEdLe""}"));
+            string text = result.Content[0].Text;
+
+            Assert.IsFalse(result.IsError);
+            StringAssert.Contains("alpha needle", text);
+            StringAssert.Contains("charlie NEEDLE", text);
+            StringAssert.DoesNotContain("bravo outside", text);
+        }
+
+        [Test]
+        public void Execute_CombinesSeverityAndMessageContainsFilters()
+        {
+            ReadUnityConsoleLogsTool tool = CreateToolWithEntries(
+                new UnityConsoleLogEntry("network alpha", null, UnityConsoleLogSeverity.Error),
+                new UnityConsoleLogEntry("network bravo", null, UnityConsoleLogSeverity.Warning),
+                new UnityConsoleLogEntry("graphics alpha", null, UnityConsoleLogSeverity.Error));
+
+            ToolsCallResult result = tool.Execute(JsonHelper.ParseElement(@"{""severities"": [""error""], ""message_contains"": ""network""}"));
+            string text = result.Content[0].Text;
+
+            Assert.IsFalse(result.IsError);
+            StringAssert.Contains("network alpha", text);
+            StringAssert.DoesNotContain("network bravo", text);
+            StringAssert.DoesNotContain("graphics alpha", text);
+        }
+
+        [Test]
+        public void Execute_AppliesFiltersBeforeTailCut()
+        {
+            ReadUnityConsoleLogsTool tool = CreateToolWithEntries(
+                new UnityConsoleLogEntry("old error one", null, UnityConsoleLogSeverity.Error),
+                new UnityConsoleLogEntry("old error two", null, UnityConsoleLogSeverity.Error),
+                new UnityConsoleLogEntry("old error three", null, UnityConsoleLogSeverity.Error),
+                new UnityConsoleLogEntry("new info one", null, UnityConsoleLogSeverity.Info),
+                new UnityConsoleLogEntry("new info two", null, UnityConsoleLogSeverity.Info),
+                new UnityConsoleLogEntry("new info three", null, UnityConsoleLogSeverity.Info));
+
+            ToolsCallResult result = tool.Execute(JsonHelper.ParseElement(@"{""severities"": [""error""], ""max_entries"": 2}"));
+            string text = result.Content[0].Text;
+
+            Assert.IsFalse(result.IsError);
+            StringAssert.Contains("old error two", text);
+            StringAssert.Contains("old error three", text);
+            StringAssert.DoesNotContain("old error one", text);
+            StringAssert.DoesNotContain("new info three", text);
+        }
+
+        [Test]
+        public void Execute_ReturnsError_ForInvalidSeverity()
+        {
+            ReadUnityConsoleLogsTool tool = CreateToolWithEntries(
+                new UnityConsoleLogEntry("plain alpha", null, UnityConsoleLogSeverity.Info));
+
+            ToolsCallResult result = tool.Execute(JsonHelper.ParseElement(@"{""severities"": [""fatal""]}"));
+
+            Assert.IsTrue(result.IsError);
+            StringAssert.Contains("Invalid severity 'fatal'. Expected one of: error, warning, info.", result.Content[0].Text);
         }
 
         [Test]
@@ -223,6 +311,17 @@ namespace UnityCodeMcpServer.Tests.EditMode
         private static UnityConsoleLogReadResult CreateReaderResult(params UnityConsoleLogEntry[] entries)
         {
             return new UnityConsoleLogReadResult(entries, entries.Length, null, false);
+        }
+
+        private static ReadUnityConsoleLogsTool CreateToolWithEntries(params UnityConsoleLogEntry[] entries)
+        {
+            return new ReadUnityConsoleLogsTool((maxEntries, predicate) =>
+            {
+                IReadOnlyList<UnityConsoleLogEntry> selectedEntries = predicate == null
+                    ? UnityConsoleLogReader.SelectTail(entries, maxEntries)
+                    : UnityConsoleLogReader.SelectTail(entries, maxEntries, predicate);
+                return new UnityConsoleLogReadResult(selectedEntries, entries.Length, null, false);
+            });
         }
     }
 }

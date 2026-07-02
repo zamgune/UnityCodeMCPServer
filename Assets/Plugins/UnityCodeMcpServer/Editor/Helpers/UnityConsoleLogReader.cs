@@ -64,6 +64,11 @@ namespace UnityCodeMcpServer.Helpers
 
         public static UnityConsoleLogReadResult ReadTail(int maxEntries)
         {
+            return ReadTail(maxEntries, null);
+        }
+
+        public static UnityConsoleLogReadResult ReadTail(int maxEntries, Func<UnityConsoleLogEntry, bool> predicate)
+        {
             int effectiveLimit = NormalizeMaxEntries(maxEntries);
             if (!TryCreateAccessor(out ReflectionAccessor accessor, out string errorText))
             {
@@ -80,8 +85,19 @@ namespace UnityCodeMcpServer.Helpers
                     return new UnityConsoleLogReadResult(Array.Empty<UnityConsoleLogEntry>(), 0, null, false);
                 }
 
-                IReadOnlyList<UnityConsoleLogEntry> entries = ReadTailEntries(accessor, totalCount, effectiveLimit);
-                return new UnityConsoleLogReadResult(entries, totalCount, null, false);
+                int resultCount = totalCount;
+                IReadOnlyList<UnityConsoleLogEntry> entries;
+                if (predicate == null)
+                {
+                    entries = ReadTailEntries(accessor, totalCount, effectiveLimit);
+                }
+                else
+                {
+                    entries = ReadTailEntries(accessor, totalCount, effectiveLimit, predicate, out int scannedCount);
+                    resultCount = scannedCount;
+                }
+
+                return new UnityConsoleLogReadResult(entries, resultCount, null, false);
             }
             catch (Exception ex)
             {
@@ -112,6 +128,33 @@ namespace UnityCodeMcpServer.Helpers
             return tailEntries;
         }
 
+        public static IReadOnlyList<UnityConsoleLogEntry> SelectTail(IReadOnlyList<UnityConsoleLogEntry> entries, int maxEntries, Func<UnityConsoleLogEntry, bool> predicate)
+        {
+            if (predicate == null)
+            {
+                return SelectTail(entries, maxEntries);
+            }
+
+            if (entries == null || entries.Count == 0)
+            {
+                return Array.Empty<UnityConsoleLogEntry>();
+            }
+
+            int effectiveLimit = NormalizeMaxEntries(maxEntries);
+            List<UnityConsoleLogEntry> tailEntries = new(Math.Min(entries.Count, effectiveLimit));
+            for (int i = entries.Count - 1; i >= 0 && tailEntries.Count < effectiveLimit; i--)
+            {
+                UnityConsoleLogEntry entry = entries[i];
+                if (predicate(entry))
+                {
+                    tailEntries.Add(entry);
+                }
+            }
+
+            tailEntries.Reverse();
+            return tailEntries;
+        }
+
         private static IReadOnlyList<UnityConsoleLogEntry> ReadTailEntries(ReflectionAccessor accessor, int totalCount, int maxEntries)
         {
             int startIndex = Math.Max(0, totalCount - maxEntries);
@@ -127,6 +170,29 @@ namespace UnityCodeMcpServer.Helpers
                 entries.Add(entry);
             }
 
+            return entries;
+        }
+
+        private static IReadOnlyList<UnityConsoleLogEntry> ReadTailEntries(ReflectionAccessor accessor, int totalCount, int maxEntries, Func<UnityConsoleLogEntry, bool> predicate, out int scannedCount)
+        {
+            List<UnityConsoleLogEntry> entries = new(Math.Min(totalCount, maxEntries));
+            scannedCount = 0;
+
+            for (int row = totalCount - 1; row >= 0 && entries.Count < maxEntries; row--)
+            {
+                scannedCount++;
+                if (!TryCreateStructuredEntry(accessor, row, out UnityConsoleLogEntry entry))
+                {
+                    continue;
+                }
+
+                if (predicate(entry))
+                {
+                    entries.Add(entry);
+                }
+            }
+
+            entries.Reverse();
             return entries;
         }
 

@@ -59,6 +59,27 @@ namespace UnityCodeMcpServer.Tests.EditMode
         }
 
         [Test]
+        public void SelectTail_WithPredicate_AppliesPredicateBeforeTailCut()
+        {
+            IReadOnlyList<UnityConsoleLogEntry> tail = UnityConsoleLogReader.SelectTail(
+                new[]
+                {
+                    new UnityConsoleLogEntry("old error one", null, UnityConsoleLogSeverity.Error),
+                    new UnityConsoleLogEntry("old error two", null, UnityConsoleLogSeverity.Error),
+                    new UnityConsoleLogEntry("old error three", null, UnityConsoleLogSeverity.Error),
+                    new UnityConsoleLogEntry("new info one", null, UnityConsoleLogSeverity.Info),
+                    new UnityConsoleLogEntry("new info two", null, UnityConsoleLogSeverity.Info),
+                    new UnityConsoleLogEntry("new info three", null, UnityConsoleLogSeverity.Info)
+                },
+                2,
+                entry => entry.Severity == UnityConsoleLogSeverity.Error);
+
+            Assert.AreEqual(2, tail.Count);
+            Assert.AreEqual("old error two", tail[0].Message);
+            Assert.AreEqual("old error three", tail[1].Message);
+        }
+
+        [Test]
         public void ReadTail_PreservesStackTrace_ForInfoEntries()
         {
             string probeId = "reader-info-" + System.Guid.NewGuid().ToString("N");
