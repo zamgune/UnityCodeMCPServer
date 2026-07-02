@@ -147,6 +147,20 @@ Open **Tools/UnityCodeMcpServer/Show or Create Settings**. Both default **on**:
 | `get_unity_game_view_window_screenshot` | Capture the Game View as an image. |
 | `get_unity_info` | Report current project and server settings. |
 
+## CLI (no MCP client needed)
+
+The bridge also ships a one-shot `unity-code` CLI, so any agent (or human) that can run shell commands can use every tool with **zero MCP registration** — and no MCP per-tool timeout, which makes it a robust fallback for clients with low timeout caps (e.g. Codex's default `tool_timeout_sec`):
+
+```bash
+cd <PROJECT>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~
+uv run unity-code list                                        # tool names + descriptions
+uv run unity-code exec 'return Application.unityVersion;'     # run C# in the Editor
+uv run unity-code call read_unity_console_logs '{"max_entries": 50}'
+echo 'Debug.Log("hi"); return null;' | uv run unity-code exec # long scripts via stdin
+```
+
+Flags: `--project-root <path>` (target another project's editor), `--timeout <sec>` (domain reloads can block the full duration), `--json` (raw result). Exit codes: `0` ok, `1` tool reported an error, `2` transport error/timeout. Image results (screenshots) are saved to the working directory and the path is printed.
+
 ## Agent skills
 
 Markdown skills that teach an agent to use the tools well. Installed/updated automatically into the configured directory (`.agents/skills/`, `.claude/skills/`, `.github/skills/`, or custom — set under the **Skills** section of the settings).

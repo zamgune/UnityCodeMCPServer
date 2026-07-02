@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 unity-code-mcp-stdio = "unity_code_mcp_stdio:main"
+unity-code = "unity_code_mcp_stdio.cli:main"
 
 [project.optional-dependencies]
 dev = [
