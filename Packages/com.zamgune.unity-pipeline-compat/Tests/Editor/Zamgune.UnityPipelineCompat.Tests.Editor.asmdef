@@ -1,0 +1,26 @@
+{
+  "name": "Zamgune.UnityPipelineCompat.Tests.Editor",
+  "rootNamespace": "Zamgune.UnityPipelineCompat.Tests",
+  "references": [
+    "Zamgune.UnityPipelineCompat.Editor",
+    "Unity.Pipeline",
+    "Unity.InputSystem",
+    "Unity.Nuget.Newtonsoft-Json"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "Newtonsoft.Json.dll"
+  ],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

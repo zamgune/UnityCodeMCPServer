@@ -1,0 +1,24 @@
+{
+  "name": "com.zamgune.unity-pipeline-compat",
+  "version": "0.1.0",
+  "displayName": "Zamgune Unity Pipeline Compatibility",
+  "description": "Editor-only Unity Pipeline commands that preserve InputAction-name based timed play automation while projects migrate from UnityCodeMCPServer to the official Unity CLI.",
+  "unity": "6000.0",
+  "author": {
+    "name": "zamgune",
+    "url": "https://github.com/zamgune/UnityCodeMCPServer"
+  },
+  "dependencies": {
+    "com.unity.pipeline": "0.3.1-exp.1",
+    "com.unity.inputsystem": "1.19.0"
+  },
+  "keywords": [
+    "unity-cli",
+    "pipeline",
+    "mcp",
+    "testing",
+    "input-system"
+  ],
+  "license": "MIT",
+  "documentationUrl": "https://github.com/zamgune/UnityCodeMCPServer/tree/main/Packages/com.zamgune.unity-pipeline-compat"
+}
