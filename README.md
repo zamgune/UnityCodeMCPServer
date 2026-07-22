@@ -1,207 +1,220 @@
-# Unity Code MCP Server
+# Unity CLI Pipeline Compatibility
 
-Give an AI agent full control of the Unity Editor over MCP: search the live project, execute C# inside the Editor, run tests, drive Play Mode, and read the console — all in a closed loop.
+This repository now uses Unity's official CLI, MCP server, and `com.unity.pipeline` package as
+the default automation path.
 
-- **Search the live project** — scenes, components, assets, console output, settings, Play Mode state, runtime values.
-- **Execute inside the Editor** — create/modify GameObjects, prefabs, ScriptableObjects, import settings, and any other asset by running C#.
-- **Verify with runtime feedback** — Edit/Play Mode tests, simulated input, screenshots, console logs, live state inspection.
+The maintained package is `com.zamgune.unity-pipeline-compat` `0.2.0`. It adds only the two
+capabilities that were not equivalent during the migration from UnityCodeMCPServer:
 
-*Example: playing Pong in a closed loop with `enter_play_mode`, `execute_csharp_script_in_unity_editor`, `play_unity_game`, and `read_unity_console_logs`.*
-![Play Pong game example](images/PongVideoShort.gif)
+- deterministic, InputAction-name based timed Play Mode steps;
+- final-composited Game View capture, including `ScreenSpaceOverlay` UI.
 
----
+The old `com.signal-loop.unitycodemcpserver` package and Python/uv stdio bridge remain in this
+repository at `0.7.0` for rollback only. They are not required by the official path and are not the
+default installation.
 
-## Agent setup (copy-paste)
+## Validated baseline
 
-The fastest way to install: paste the block below into **Claude Code** or **Codex** running in your Unity project, replacing `<PROJECT_ROOT>` with the absolute path to the project (the folder containing `Assets/`). The agent installs the package and registers the MCP server for you.
+| Component | Version | Role |
+| --- | --- | --- |
+| Unity Editor | Unity 6.0 or newer | Pipeline host |
+| Unity CLI | `1.0.0-beta.2` | CLI and official MCP stdio server |
+| `com.unity.pipeline` | `0.3.1-exp.1` | Editor command surface |
+| `com.zamgune.unity-pipeline-compat` | `0.2.0` | Timed input and composed capture only |
+| Input System | `1.19.0` | Named InputAction injection |
 
-````text
-Set up the Unity Code MCP Server for the Unity project at <PROJECT_ROOT> and register it with your MCP client.
+Unity CLI is beta and Pipeline is experimental. Pin these versions when reproducing the validated
+setup instead of silently accepting a newer release.
 
-1. Verify `uv` is installed: run `uv --version`. If missing, install it from
-   https://docs.astral.sh/uv/getting-started/installation and re-check.
+Official references:
 
-2. Add these dependencies to <PROJECT_ROOT>/Packages/manifest.json under "dependencies"
-   (keep all existing entries; skip the UniTask line if the project already has UniTask):
-     "com.cysharp.unitask": "https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask",
-     "com.signal-loop.unitycodemcpserver": "https://github.com/zamgune/UnityCodeMCPServer.git?path=Assets/Plugins/UnityCodeMcpServer"
+- [Unity CLI announcement](https://unity.com/blog/meet-the-unity-cli)
+- [Unity CLI documentation](https://docs.unity.com/en-us/unity-cli)
+- [Unity Pipeline package](https://docs.unity.com/en-us/unity-production-pipeline/local-tools-cli/unity-pipeline-package)
 
-3. Ask me to open the project in Unity once so it resolves the packages and copies the stdio
-   bridge to <PROJECT_ROOT>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~ . Wait for that.
+## Install the official path
 
-4. Register the bridge as an MCP server using a name unique to this project (e.g. unity_<folder>).
-   Let STDIO_DIR = <PROJECT_ROOT>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~
-   - If you are Claude Code, run:
-       claude mcp add unity_<folder> -s local -- uv run --directory "STDIO_DIR" unity-code-mcp-stdio --request-timeout 240
-   - If you are Codex, add this to ~/.codex/config.toml:
-       [mcp_servers.unity_<folder>]
-       command = "uv"
-       args = ["run", "--directory", "STDIO_DIR", "unity-code-mcp-stdio", "--request-timeout", "240"]
-       startup_timeout_sec = 60
-       tool_timeout_sec = 300
+### 1. Install and pin Unity CLI
 
-5. Restart the MCP client and confirm the unity_<folder> server connects. With Unity open, its
-   tools (execute_csharp_script_in_unity_editor, run_unity_tests, read_unity_console_logs, ...)
-   should be listed.
+Follow Unity's installation documentation, then verify the binary and pin the validated beta when
+that exact environment is required:
 
-IMPORTANT: the client's per-tool MCP timeout must be >= the bridge --request-timeout (240s).
-Codex's tool_timeout_sec defaults to 60s and MUST be raised, or a domain-reload/recompile call
-aborts before Unity answers. Claude Code has no such low cap.
-````
-
-> It registers as a **local stdio** MCP server, not a remote "Connector" (those are HTTP/SSE URLs) — so it won't appear in any Connector list. That's expected.
-
----
-
-## Manual setup
-
-**Requirements**
-
-- Unity 2022.3 LTS or higher (tested on 2022.3.62f3 and 6000.2.7f2)
-- [`uv`](https://docs.astral.sh/uv/) — runs the bundled Python stdio bridge
-- [UniTask](https://github.com/Cysharp/UniTask) — referenced by name, so any copy in the project works
-
-**1. Install the package.** In **Window > Package Manager > + > Add package from git URL**, add UniTask (skip if already present), then this package:
-
-```
-https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask
-https://github.com/zamgune/UnityCodeMCPServer.git?path=Assets/Plugins/UnityCodeMcpServer
+```sh
+unity --version
+unity upgrade --target 1.0.0-beta.2
+unity --version
 ```
 
-Opening the project copies the stdio bridge to `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~` (kept in sync on every package update) and installs the agent skills.
+The final output must be `1.0.0-beta.2` for the baseline documented here.
 
-**2. Register the bridge** with your MCP client, pointing at that `STDIO~` directory. Generic JSON form:
+### 2. Install Pipeline into the Unity project
+
+Open the project once in Unity 6, authenticate the CLI if needed, and install the exact Pipeline
+package:
+
+```sh
+unity auth login
+unity pipeline install \
+  --project-path "/absolute/path/to/UnityProject" \
+  --package-version 0.3.1-exp.1
+```
+
+### 3. Add the compatibility package
+
+Add this dependency to the project's `Packages/manifest.json` only when deterministic named input
+or final-composited Game View capture is needed:
 
 ```json
 {
-  "command": "uv",
-  "args": ["run", "--directory", "<PROJECT>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~", "unity-code-mcp-stdio", "--request-timeout", "240"]
+  "dependencies": {
+    "com.zamgune.unity-pipeline-compat": "https://github.com/zamgune/UnityCodeMCPServer.git?path=/Packages/com.zamgune.unity-pipeline-compat#compat-v0.2.0"
+  }
 }
 ```
 
-To run the bridge from outside the project, pass `--project-root /path/to/UnityProject`.
+The package itself pins Pipeline `0.3.1-exp.1` and Input System `1.19.0`. For production projects,
+keep the Git tag or replace it with an audited commit SHA; do not depend on a moving branch.
 
-### Timeouts (read this if calls time out)
+No Python, uv, UniTask, settings asset, copied bridge, or background file watcher is used by this
+path.
 
-During a recompile/domain reload the bridge **defers** the request and answers it after the fresh assemblies load — a single call can legitimately block for the whole reload. Keep the **client's per-tool timeout ≥ the bridge `--request-timeout`**. Codex's `tool_timeout_sec` defaults to 60s (too low) — set `tool_timeout_sec = 300` and `startup_timeout_sec = 60` in its `[mcp_servers.*]` block.
+### 4. Register the official MCP server
 
-### Cross-platform (one committed config for macOS + Windows)
+Always bind the MCP process to one canonical project path. This prevents another open Unity Editor
+from being selected accidentally.
 
-The absolute `--directory` path differs per machine, but the part *below the project root* is identical everywhere. To keep a single committed config that works on both OSes, make the bridge path **project-relative** instead of absolute:
+For Codex, add a project-local `.codex/config.toml` using the absolute path returned by
+`command -v unity` on macOS/Linux or the resolved executable path on Windows:
 
-- **Claude Code** — commit a project `.mcp.json` and use the `${CLAUDE_PROJECT_DIR:-.}` placeholder (Claude Code injects `CLAUDE_PROJECT_DIR` = project root into the server's environment):
-
-  ```json
-  {
-    "mcpServers": {
-      "unity": {
-        "command": "uv",
-        "args": ["run", "--directory", "${CLAUDE_PROJECT_DIR:-.}/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~", "unity-code-mcp-stdio", "--request-timeout", "240"]
-      }
-    }
-  }
-  ```
-
-  Editing `.mcp.json` requires re-approving the server once per machine in the `claude` TUI. (If your Unity project lives in a subfolder, prefix the relative path with it, e.g. `${CLAUDE_PROJECT_DIR:-.}/MyUnityApp/Assets/...`.)
-
-- **Codex** — `config.toml` does **not** expand variables in `args`, so use a **relative** `--directory` (resolved from the project root Codex launches in):
-
-  ```toml
-  [mcp_servers.unity]
-  command = "uv"
-  args = ["run", "--directory", "Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~", "unity-code-mcp-stdio", "--request-timeout", "240"]
-  startup_timeout_sec = 60
-  tool_timeout_sec = 300
-  ```
-
-  Forward slashes work on Windows too. Alternatively, register Codex servers in the per-machine `~/.codex/config.toml` with an absolute path — that file isn't shared across machines, so it sidesteps the problem.
-
-### Using two projects at once
-
-The transport is fully project-isolated, so multiple editors can run at once. Give each project a **distinct MCP server name** (e.g. `unity_projectA` / `unity_projectB`); a shared name routes everything to one bridge.
-
-### In-Editor Setup & Status panel
-
-Open **Tools/UnityCodeMcpServer/Show or Create Settings** (it also opens automatically the first time the package is installed). The **Setup & Status** section at the top shows whether the server is listening (`Running`/`Stopped`, with a **Restart** button) and when a client last sent a request — the in-Unity confirmation that the transport works. It also gives **copy-ready config** for **Claude Code**, **Codex**, and a **generic JSON** client, each pre-filled with this machine's resolved `STDIO~` path so you don't have to assemble the absolute path by hand.
-
-### Reliability settings (Unity)
-
-Open **Tools/UnityCodeMcpServer/Show or Create Settings**. Both default **on**:
-
-- **Auto Refresh Assets On Request** — externally edited scripts compile without the editor needing focus.
-- **Run In Background During Play Mode** — services requests from an unfocused editor in Play Mode (runtime-only; does not change builds).
-
-> **Upgrading?** A settings asset created before these fields existed deserializes them to `false`. Open the settings and confirm both toggles are on.
-
----
-
-## Tools
-
-| Tool | Purpose |
-| --- | --- |
-| `execute_csharp_script_in_unity_editor` | Run generated C# in the Editor (full UnityEngine/UnityEditor + reflection). Captures logs, errors, and return value. |
-| `read_unity_console_logs` | Read Console logs (1–1000 entries, default 200). |
-| `run_unity_tests` | Run EditMode/PlayMode tests via TestRunnerApi; all or filtered by name. |
-| `enter_play_mode` / `exit_play_mode` | Enter/exit Play Mode (pauses time, returns immediately). |
-| `play_unity_game` | Unpause, simulate Input System actions, collect logs, pause again. |
-| `get_unity_game_view_window_screenshot` | Capture the Game View as an image. |
-| `get_unity_info` | Report current project and server settings. |
-
-## CLI (no MCP client needed)
-
-The bridge also ships a one-shot `unity-code` CLI, so any agent (or human) that can run shell commands can use every tool with **zero MCP registration** — and no MCP per-tool timeout, which makes it a robust fallback for clients with low timeout caps (e.g. Codex's default `tool_timeout_sec`):
-
-```bash
-cd <PROJECT>/Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~
-uv run unity-code list                                        # tool names + descriptions
-uv run unity-code exec 'return Application.unityVersion;'     # run C# in the Editor
-uv run unity-code call read_unity_console_logs '{"max_entries": 50}'
-echo 'Debug.Log("hi"); return null;' | uv run unity-code exec # long scripts via stdin
+```toml
+[mcp_servers.unity_my_project]
+command = "/absolute/path/to/unity"
+args = ["mcp", "--project-path", "/absolute/path/to/UnityProject"]
+startup_timeout_sec = 60
+tool_timeout_sec = 300
 ```
 
-Flags: `--project-root <path>` (target another project's editor), `--timeout <sec>` (domain reloads can block the full duration), `--json` (raw result). Exit codes: `0` ok, `1` tool reported an error, `2` transport error/timeout. Image results (screenshots) are saved to the working directory and the path is printed.
+This repository includes a canonical Mac example at
+[`/.codex/config.toml.example`](.codex/config.toml.example). Copy it to `.codex/config.toml` for
+the local checkout; the active file is ignored so another machine can use its own absolute paths.
 
-## Agent skills
+Unity CLI can list supported client configuration targets with:
 
-Markdown skills that teach an agent to use the tools well. Installed/updated automatically into the configured directory (`.agents/skills/`, `.claude/skills/`, `.github/skills/`, or custom — set under the **Skills** section of the settings).
+```sh
+unity mcp configure --list
+```
 
-- `executing-csharp-scripts-in-unity-editor` — safe, effective script execution; debugging loops; **domain-reload timing discipline**.
-- `unity-game-player` — closed-loop autonomous game playing (sense → compute → act).
-- `building-unity-ui-from-html` — convert HTML/CSS prototypes into faithful uGUI.
+Inspect generated client configuration before committing it. The MCP client must ultimately launch
+`unity mcp --project-path <canonical-project-path>`.
+
+### 5. Verify the target Editor
+
+With the intended Editor open and compilation complete:
+
+```sh
+unity status
+unity command --project-path "/absolute/path/to/UnityProject"
+```
+
+Then connect a fresh MCP client and call `editor_status`. Require the exact project path, a ready
+Editor, and `compiling=false` before any mutation.
+
+## Official command map
+
+| Task | Official Pipeline command |
+| --- | --- |
+| Inspect Editor state | `editor_status` |
+| Read Console entries | `get_console_logs` |
+| Execute live C# | `eval`, `eval_file` |
+| Discover and run tests | `list_tests`, `run_tests`, `test_status` |
+| Control Play Mode | `editor_play`, `editor_pause`, `editor_stop` |
+| Capture camera or Scene view | `capture_game_view`, `capture_scene_view` |
+| Discover custom project commands | `unity command --project-path <path>` |
+
+Use typed commands before `eval`. Use normal file tools for source, JSON, YAML, and serialized
+asset edits; `eval` is for live Editor inspection or a deliberately scoped Editor API action.
+
+## Compatibility commands
+
+### `zamgune_play_begin`
+
+Requests Play Mode and establishes a paused automation session with `Time.timeScale=0`. Entering
+Play Mode can reload the domain, so reconnect and check `editor_status` before stepping.
+
+### `zamgune_play_step`
+
+Advances time for `duration_ms`, injects optional named InputActions, captures logs, releases all
+injected state, restores focus/background settings, and returns to `Time.timeScale=0`.
+
+```json
+{
+  "options": {
+    "duration_ms": 1000,
+    "input_action_asset_path": "Assets/InputSystem_Actions.inputactions",
+    "inputs": [
+      { "action": "Player/MoveRight", "type": "hold" },
+      { "action": "Player/Jump", "type": "press" }
+    ]
+  }
+}
+```
+
+### `zamgune_capture_game_view`
+
+Captures the final Play Mode Game View through Unity's screenshot path. Use it when overlay UI must
+be present; Pipeline's `capture_game_view` is camera-rendered and can omit `ScreenSpaceOverlay`
+canvases.
+
+### `zamgune_play_end`
+
+Releases/reset input state, restores the original time scale, and requests Edit Mode. Call it during
+normal completion and failure recovery.
+
+See the [package documentation](Packages/com.zamgune.unity-pipeline-compat/README.md) for the full
+argument and cleanup contract.
+
+## Development and verification
+
+Opening this repository as a Unity project embeds the compatibility package from
+`Packages/com.zamgune.unity-pipeline-compat`; the root manifest pins Pipeline and exposes the package
+tests.
+
+Before a release:
+
+1. confirm package JSON and changelog versions agree;
+2. check `git diff --check` and confirm unrelated user files are untouched;
+3. run the compatibility Editor tests;
+4. verify MCP command discovery and `editor_status` against this exact project path;
+5. exercise begin, a one-second step, composed capture, and end twice;
+6. confirm Console errors and stuck inputs are zero.
+
+The `0.1.0` command implementation was validated across UnityMCPTest, OhMyFarm, and Sheep-Wolf
+before this official-first release. `0.2.0` preserves that command contract and changes the
+repository's supported/default route.
+
+## Legacy rollback only
+
+The legacy source remains at `Assets/Plugins/UnityCodeMcpServer` and its transport documentation is
+in [README_STDIO.md](README_STDIO.md). It remains version `0.7.0`; no official CLI capability is
+implied by that package version.
+
+Because that source is intentionally retained inside this repository's Unity test project, the
+Editor still compiles it and can start its idle file watcher. No active MCP configuration points to
+that watcher. The repository settings redirect its auto-installed legacy skills into ignored
+`Library/LegacyUnityCodeMcpServerSkills`; the only active Unity automation skill is the official
+Pipeline skill under `.agents/skills`.
+
+Do not install both paths as permanent defaults. If rollback is required, restore the legacy package
+and old MCP configuration as one reversible change, diagnose the official-path failure, and return
+to the official CLI after verification.
 
 ## Security
 
-This package executes LLM-generated C# (including reflection) with the Unity Editor's privileges. Review scripts before running, prefer an isolated project/VM, and note that you are responsible for any resulting changes or data loss.
-
-## Extending
-
-Implement `ITool`, `IToolAsync`, `IPrompt`, or `IResource` anywhere in your codebase; the server auto-discovers and registers them. Minimal example:
-
-```csharp
-public class EchoTool : ITool
-{
-    public string Name => "echo";
-    public string Description => "Echoes the input text back to the caller";
-    public JsonElement InputSchema => JsonHelper.ParseElement(
-        @"{ ""type"":""object"", ""properties"":{ ""text"":{ ""type"":""string"" } }, ""required"":[""text""] }");
-
-    public ToolsCallResult Execute(JsonElement arguments) =>
-        ToolsCallResult.TextResult($"Echo: {arguments.GetStringOrDefault("text", "")}");
-}
-```
-
-For async tools return `UniTask<ToolsCallResult>` from `IToolAsync.ExecuteAsync`. To expand the script execution context, add assembly names under **Additional Assemblies** in the settings.
-
-## More docs
-
-- Architecture and the stdio bridge: [README_STDIO.md](README_STDIO.md)
-- Full workflow example: [cities workflow + transcript](Assets/Plugins/UnityCodeMcpServer/Documentation~/Examples/UsageExample_CitiesWorkflow.md)
-- Release notes: [`Dev/Releases/`](Dev/Releases/)
-
-## Known issues
-
-**GUID conflicts with existing DLLs** — the package bundles Roslyn/`System.Text.Json` DLLs. If your project already contains them you may see GUID conflict warnings; they are usually harmless. Remove the duplicate DLLs if they cause problems, or open an [issue](https://github.com/Signal-Loop/UnityCodeMCPServer/issues).
+Both Pipeline `eval` and the legacy server can execute C# with Unity Editor privileges. Review
+generated code, pin the exact project path, prefer a clean worktree for destructive validation, and
+inspect Git state after automation.
 
 ## License
 
-MIT — fork of [Signal-Loop/UnityCodeMCPServer](https://github.com/Signal-Loop/UnityCodeMCPServer).
+MIT. The retained legacy package is a fork of
+[Signal Loop's UnityCodeMCPServer](https://github.com/Signal-Loop/UnityCodeMCPServer).

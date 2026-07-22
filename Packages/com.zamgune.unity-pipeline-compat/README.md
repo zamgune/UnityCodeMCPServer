@@ -1,8 +1,8 @@
 # Zamgune Unity Pipeline Compatibility
 
-An Editor-only package that keeps the InputAction-name based timed-play workflow from
-`play_unity_game` and captures the final composed Play Mode Game View while projects move to
-Unity's official CLI and `com.unity.pipeline`.
+Version `0.2.0` is an Editor-only companion to Unity's official CLI and `com.unity.pipeline`.
+It keeps the InputAction-name based timed-play workflow from legacy `play_unity_game` and captures
+the final composed Play Mode Game View without retaining the old custom MCP server.
 
 ## Requirements
 
@@ -12,6 +12,9 @@ Unity's official CLI and `com.unity.pipeline`.
 - Input System `1.19.0`
 
 The package has no Python, uv, UniTask, settings asset, or background file watcher.
+
+The repository still contains UnityCodeMCPServer `0.7.0` as rollback source, but that package is
+not installed or required by this compatibility package.
 
 ## Commands
 

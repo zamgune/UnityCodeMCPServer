@@ -1,0 +1,5 @@
+[mcp_servers.unity_codemcp]
+command = "/Users/zamgune/.unity/bin/unity"
+args = ["mcp", "--project-path", "/Volumes/WD_1TB/ForkDefault/UnityCodeMCPServer"]
+startup_timeout_sec = 60
+tool_timeout_sec = 300

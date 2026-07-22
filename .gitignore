@@ -35,6 +35,7 @@ ExportedObj/
 *.csproj
 *.unityproj
 *.sln
+*.slnx
 *.suo
 *.tmp
 *.user
@@ -83,6 +84,7 @@ crashlytics-build.properties
 Dev/Python/.python-version
 UnityCodeMcpServerLog.log
 .mcp.json
+/.codex/config.toml
 
 # MCP file-transport runtime messages
 .unityCodeMcpServer/messages/

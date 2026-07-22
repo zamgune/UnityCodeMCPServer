@@ -4,58 +4,88 @@ Agent guidance for contributors working in this repository.
 
 ## Scope
 
-- This file is for work inside this repo, not for downstream Unity projects using the package.
-- Follow the closest AGENTS.md if a nested file is added later.
-- Explicit user instructions override this file.
+- The maintained/default integration is Unity's official CLI MCP plus `com.unity.pipeline`.
+- The compatibility package lives under `Packages/com.zamgune.unity-pipeline-compat`.
+- The executable source under `Assets/Plugins/UnityCodeMcpServer` and its Python stdio bridge are
+  rollback-only legacy code at published version `0.7.0`. Do not extend them unless the task
+  explicitly targets rollback maintenance.
+- Follow a closer `AGENTS.md` if one is added later. Explicit user instructions override this file.
 
-## Project Shape
-
-- Unity package and test project live under `Assets/Plugins/UnityCodeMcpServer`.
-- Unity tests live under `Assets/Tests` and related test assemblies in the repo root.
-- Python STDIO bridge code lives under `Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~/src`.
-
-## Editing Rules
+## Editing rules
 
 - Make the smallest change that satisfies the request.
-- Implement only the changes needed for the task, and finish the requested work before stopping.
-- Do not change unrelated code, scenes, assets, or settings.
-- Add tests for logic changes unless the change is trivial documentation or rename-only work.
-- Keep existing style and naming conventions. In Unity C# code, use snake_case for private fields.
-- Prefer latest supported Unity APIs already used by the repo.
+- Preserve unrelated dirty and untracked files.
+- Do not change scenes, assets, generated project files, or settings outside the task.
+- Add tests for behavior changes; documentation-only and version-only changes need structural
+  validation but not invented runtime tests.
+- Use snake_case for new private Unity C# fields to match repository style.
 
-## Available Unity Tools
+## Official Unity connection
 
-- `execute_csharp_script_in_unity_editor` to run C# scripts in the editor.
-- `run_unity_tests` to run Unity tests. Use this tools instead of command-line test runs for Unity-related work.
-- `read_unity_console_logs` to read Unity console logs for compile errors.
+Always target the repository's exact canonical path:
 
-### Additional Unity Tools
+```sh
+unity command --project-path "/absolute/path/to/UnityCodeMCPServer"
+unity mcp --project-path "/absolute/path/to/UnityCodeMCPServer"
+```
 
-- `play_unity_game` to start Play mode in the Unity editor for testing runtime behavior. You must use `enter_play_mode` before this and `exit_play_mode` after to return to edit mode.
+For Codex, the active server must be equivalent to:
 
-## Unity Workflow
+```toml
+[mcp_servers.unity_codemcp]
+command = "/absolute/path/to/unity"
+args = ["mcp", "--project-path", "/absolute/path/to/UnityCodeMCPServer"]
+startup_timeout_sec = 60
+tool_timeout_sec = 300
+```
 
-- Before relying on Unity editor tooling, check for compilation problems in Unity logs and fix them first.
-- If you edit C# source, validate with relevant Unity tests and re-check logs for compile errors.
-- Use `run_unity_tests` for Unity test verification and `read_unity_console_logs` to inspect compile/runtime issues.
-- When using `execute_csharp_script_in_unity_editor`, read the bundled `executing-csharp-scripts-in-unity-editor` skill first and treat script execution, console-log checks, and test runs as one workflow.
-- Do not use editor-executed C# scripts to edit source files or plain text files; use normal file editing tools for that.
+Never omit `--project-path` when more than one Editor may be open.
 
-## Verification
+## Official command workflow
 
-- For C# or Python behavior changes, run the narrowest relevant test first, then broaden only if needed.
-- For Unity test runs, fail fast on compile issues before assuming a test failure is about logic.
-- Do not claim success without fresh verification evidence.
+1. Call `editor_status` and require the exact project path, `status=ready`, and
+   `compiling=false`.
+2. Call `get_console_logs` for recent errors before tests or Editor mutation.
+3. Prefer typed Pipeline commands. Use `eval`/`eval_file` only when no typed command expresses the
+   operation.
+4. Use normal file tools for source, JSON, YAML, and serialized project files; do not write them
+   through `eval`.
+5. After C# edits, wait for compilation/domain reload, reconnect if needed, re-check
+   `editor_status`, and fix compiler errors before testing.
+6. Run the narrowest `run_tests` filter first, then broaden only when risk requires it. Inspect the
+   structured failed and skipped counts instead of treating request completion as a pass.
+7. For timed InputAction play, use `zamgune_play_begin`, one or more structured
+   `zamgune_play_step` calls, and `zamgune_play_end` in normal and failure cleanup.
+8. Use `zamgune_capture_game_view` when evidence must include overlay UI. Use Pipeline
+   `capture_game_view` only when a camera-rendered capture is sufficient.
+9. Stop Play Mode and re-check Console and Git state before handoff.
 
-## Documentation
+## Package verification
 
-- Update `README.md`, `README_STDIO.md`, release notes, or skill docs when behavior or workflow changes make existing guidance inaccurate.
-- Keep AGENTS.md concise. Put detailed end-user explanations in README or skill files instead.
+- Authoritative version: `Packages/com.zamgune.unity-pipeline-compat/package.json`.
+- Update `CHANGELOG.md` whenever that version changes.
+- Package Editor tests live under `Packages/com.zamgune.unity-pipeline-compat/Tests/Editor` and are
+  exposed through the root manifest's `testables` entry.
+- A release check must include JSON parsing, `git diff --check`, command discovery, compatibility
+  Editor tests, a one-second timed Play step, composed PNG capture, cleanup, and zero Console
+  errors.
+- Unity CLI is beta and Pipeline is experimental. Keep the validated CLI and Pipeline versions
+  pinned; do not silently upgrade while proving an unrelated change.
 
-## Dotnet tests
+## Safety boundaries
 
-Use `run_unity_tests` tool to run tests in the `Assets/Tests` folder. This will ensure that the Unity editor is properly launched and the test assemblies are correctly loaded. Avoid running dotnet tests directly from the command line, as this may lead to missing dependencies or incorrect test execution context. Always check Unity console logs for any compile errors or test failures after running tests.
+- A domain reload, stale MCP token, transport timeout, modal dialog, dirty scene, or stalled Test
+  Runner is not a passing result.
+- Do not run two mutation commands concurrently.
+- Do not save unrelated dirty scenes or regenerate unrelated serialized assets.
+- Do not publish tags, packages, or remote branches unless the user requested publication.
+- Keep legacy rollback source intact unless the task explicitly authorizes its removal.
 
-## Integration tests
+## Legacy maintenance
 
-Run `uv run C:\Users\tbory\source\Workspaces\Loop\UnityCodeMcpServer\Dev\Python\mcp_random_tester.py --sequence-length 20 --request-timeout-seconds 180 --workspace-dir .`
+If a task explicitly changes `Assets/Plugins/UnityCodeMcpServer` or
+`Assets/Plugins/UnityCodeMcpServer/Editor/STDIO~`, also follow the legacy test and packaging guidance
+in `README_STDIO.md`. The published legacy UPM package and Python bridge remain in lockstep at
+`0.7.0`; do not bump them as part of an official Pipeline release. The repository development
+project's serialized settings instance may redirect generated legacy skills away from active agent
+directories without changing that published executable release.

@@ -19,6 +19,6 @@ MonoBehaviour:
   AdditionalAssemblyNames:
   - Newtonsoft.Json
   InputActionsAssetPath: 
-  SkillsInstallTarget: 2
-  SkillsTargetPath: .agents/skills/
+  SkillsInstallTarget: 3
+  SkillsTargetPath: Library/LegacyUnityCodeMcpServerSkills/
   _hasInitializedSkillsInstallTarget: 1

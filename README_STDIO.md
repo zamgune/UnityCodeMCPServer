@@ -1,5 +1,10 @@
 # Unity Code MCP STDIO Bridge
 
+> **Legacy rollback documentation.** The maintained/default integration for this repository is
+> Unity's official `unity mcp` server with `com.unity.pipeline`; see [README.md](README.md). This
+> Python/uv bridge remains frozen at `0.7.0` only so an existing project can be rolled back while an
+> official-path problem is diagnosed.
+
 A Python package that bridges MCP (Model Context Protocol) over STDIO to Unity's file-backed transport.
 
 ## Overview
