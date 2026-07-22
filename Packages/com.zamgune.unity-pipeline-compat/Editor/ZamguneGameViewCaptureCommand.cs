@@ -187,48 +187,67 @@ namespace Zamgune.UnityPipelineCompat
             int maxHeight,
             TimeSpan timeout)
         {
-            var completion = new TaskCompletionSource<ZamguneGameViewCaptureResponse>();
-            var completionGate = new object();
+            int editorMainThreadId = Thread.CurrentThread.ManagedThreadId;
+            var completion = new TaskCompletionSource<ZamguneGameViewCaptureResponse>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             long previousLength = -1;
-            bool completed = false;
+            int completionState = 0;
             Timer timeoutTimer = null;
             EditorApplication.CallbackFunction updateCallback = null;
 
-            void Complete(ZamguneGameViewCaptureResponse response)
+            void UnsubscribeOnEditorMainThread()
             {
-                lock (completionGate)
+                if (Thread.CurrentThread.ManagedThreadId != editorMainThreadId)
                 {
-                    if (completed)
-                    {
-                        return;
-                    }
-
-                    completed = true;
+                    return;
                 }
 
-                try
+                EditorApplication.update -= updateCallback;
+            }
+
+            void TryComplete(
+                ZamguneGameViewCaptureResponse response,
+                bool invokedFromEditorUpdate)
+            {
+                bool wonCompletion = Interlocked.CompareExchange(ref completionState, 1, 0) == 0;
+
+                // Only the Editor update path may touch the EditorApplication event. If the timer
+                // wins, the next Editor update observes completionState and removes itself before
+                // polling the file or creating Unity textures.
+                if (invokedFromEditorUpdate)
                 {
-                    EditorApplication.update -= updateCallback;
-                }
-                catch
-                {
-                    // The response timeout must still complete if the Editor is tearing down.
-                }
-                finally
-                {
-                    timeoutTimer?.Dispose();
+                    UnsubscribeOnEditorMainThread();
                 }
 
+                if (!wonCompletion)
+                {
+                    return;
+                }
+
+                timeoutTimer?.Dispose();
                 completion.TrySetResult(response);
             }
 
             updateCallback = () =>
             {
+                if (Thread.CurrentThread.ManagedThreadId != editorMainThreadId)
+                {
+                    return;
+                }
+
+                if (Volatile.Read(ref completionState) != 0)
+                {
+                    UnsubscribeOnEditorMainThread();
+                    return;
+                }
+
                 if (!EditorApplication.isPlaying)
                 {
-                    Complete(ZamguneGameViewCaptureResponse.Fail(
-                        CaptureSource,
-                        "The Editor left Play Mode while capturing the Game View."));
+                    TryComplete(
+                        ZamguneGameViewCaptureResponse.Fail(
+                            CaptureSource,
+                            "The Editor left Play Mode while capturing the Game View."),
+                        invokedFromEditorUpdate: true);
                     return;
                 }
 
@@ -242,7 +261,9 @@ namespace Zamgune.UnityPipelineCompat
                             byte[] bytes = File.ReadAllBytes(path);
                             if (bytes.LongLength == currentLength)
                             {
-                                Complete(BuildResponse(bytes, maxHeight));
+                                TryComplete(
+                                    BuildResponse(bytes, maxHeight),
+                                    invokedFromEditorUpdate: true);
                                 return;
                             }
                         }
@@ -260,17 +281,21 @@ namespace Zamgune.UnityPipelineCompat
                 }
                 catch (Exception ex)
                 {
-                    Complete(ZamguneGameViewCaptureResponse.Fail(
-                        CaptureSource,
-                        $"Failed while reading the captured Game View: {ex.Message}"));
+                    TryComplete(
+                        ZamguneGameViewCaptureResponse.Fail(
+                            CaptureSource,
+                            $"Failed while reading the captured Game View: {ex.Message}"),
+                        invokedFromEditorUpdate: true);
                 }
             };
 
             EditorApplication.update += updateCallback;
             timeoutTimer = new Timer(
-                _ => Complete(ZamguneGameViewCaptureResponse.Fail(
-                    CaptureSource,
-                    $"Game View screenshot was not ready within {timeout.TotalSeconds:0} seconds.")),
+                _ => TryComplete(
+                    ZamguneGameViewCaptureResponse.Fail(
+                        CaptureSource,
+                        $"Game View screenshot was not ready within {timeout.TotalSeconds:0} seconds."),
+                    invokedFromEditorUpdate: false),
                 null,
                 timeout,
                 Timeout.InfiniteTimeSpan);
