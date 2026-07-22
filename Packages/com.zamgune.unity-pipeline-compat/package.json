@@ -2,7 +2,7 @@
   "name": "com.zamgune.unity-pipeline-compat",
   "version": "0.1.0",
   "displayName": "Zamgune Unity Pipeline Compatibility",
-  "description": "Editor-only Unity Pipeline commands that preserve InputAction-name based timed play automation while projects migrate from UnityCodeMCPServer to the official Unity CLI.",
+  "description": "Editor-only Unity Pipeline commands for InputAction-name timed play automation and final-composited Play Mode Game View capture while projects migrate from UnityCodeMCPServer to the official Unity CLI.",
   "unity": "6000.0",
   "author": {
     "name": "zamgune",

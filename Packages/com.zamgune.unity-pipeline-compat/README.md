@@ -1,7 +1,8 @@
 # Zamgune Unity Pipeline Compatibility
 
 An Editor-only package that keeps the InputAction-name based timed-play workflow from
-`play_unity_game` while projects move to Unity's official CLI and `com.unity.pipeline`.
+`play_unity_game` and captures the final composed Play Mode Game View while projects move to
+Unity's official CLI and `com.unity.pipeline`.
 
 ## Requirements
 
@@ -58,6 +59,24 @@ unity command --project-path /absolute/path/to/project --timeout 30 \
 Releases/reset inputs, restores the time scale recorded by `zamgune_play_begin`, and requests a
 return to Edit Mode.
 
+### `zamgune_capture_game_view`
+
+Captures the final Play Mode Game View through `ScreenCapture.CaptureScreenshot`, so the returned
+PNG includes the image Unity presents in the Game View, including `ScreenSpaceOverlay` canvases.
+Unlike Pipeline's camera-rendered `capture_game_view`, this command requires Play Mode and waits for
+Unity to finish its end-of-frame screenshot.
+
+```sh
+unity command --project-path /absolute/path/to/project --timeout 15 \
+  zamgune_capture_game_view --max_height 640
+```
+
+`max_height` defaults to `640` and accepts values from `1` through `4096`. Captures taller than the
+limit are scaled proportionally without upscaling smaller images. The response contains `Success`,
+`Error`, `Base64`, `Width`, `Height`, `Bytes`, and `Source`. Screenshot files exist only under the
+Unity project's `Temp` directory while the command is running; the command exposes no output-path
+argument and deletes its temporary file after encoding the response.
+
 ## Tests
 
 Package Editor tests live under `Tests/Editor`. Add the package name to the consuming project's
@@ -68,7 +87,8 @@ Package Editor tests live under `Tests/Editor`. Add the package name to the cons
 ```
 
 The Editor tests cover command metadata, structured JSON input, deterministic asset resolution,
-simultaneous keyboard state, and residual input reset. A live Unity CLI integration pass is still
-required to prove Play Mode transitions, timed game advancement, reconnection, and focus behavior.
+simultaneous keyboard state, residual input reset, capture-height validation, and proportional
+capture scaling. A live Unity CLI integration pass is still required to prove Play Mode transitions,
+timed game advancement, reconnection, focus behavior, and final-composited Game View capture.
 
 See [Documentation~/index.md](Documentation~/index.md) for lifecycle and failure semantics.
