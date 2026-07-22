@@ -1,6 +1,8 @@
-﻿<Solution>
+<Solution>
   <Project Path="UnityCodeMcpServerTestsEditMode.csproj" />
   <Project Path="Assembly-CSharp.csproj" />
   <Project Path="UnityCodeMcpServer.csproj" />
+  <Project Path="Zamgune.UnityPipelineCompat.Editor.csproj" />
+  <Project Path="Zamgune.UnityPipelineCompat.Tests.Editor.csproj" />
   <Project Path="UnityCodeMcpServer.Tests.PlayMode.csproj" />
 </Solution>
