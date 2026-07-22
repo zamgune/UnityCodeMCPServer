@@ -16,6 +16,7 @@ namespace Zamgune.UnityPipelineCompat
 
         private const string CaptureSource = "gameView:ScreenCapture.CaptureScreenshot";
         private static readonly TimeSpan CaptureTimeout = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan LateCaptureCleanupObservation = TimeSpan.FromSeconds(30);
 
         [CliCommand(
             "zamgune_capture_game_view",
@@ -42,6 +43,8 @@ namespace Zamgune.UnityPipelineCompat
 
             string temporaryDirectory = null;
             string temporaryPath = null;
+            bool captureRequested = false;
+            CaptureWaitResult waitResult = null;
             try
             {
                 temporaryDirectory = CreateTemporaryCaptureDirectory();
@@ -49,12 +52,15 @@ namespace Zamgune.UnityPipelineCompat
 
                 RepaintGameView();
                 ScreenCapture.CaptureScreenshot(temporaryPath, 1);
+                captureRequested = true;
 
-                return await WaitForScreenshotResponseAsync(
+                waitResult = await WaitForScreenshotResponseAsync(
                         temporaryPath,
+                        temporaryDirectory,
                         maxHeight,
                         CaptureTimeout)
                     .ConfigureAwait(false);
+                return waitResult.Response;
             }
             catch (Exception ex)
             {
@@ -64,7 +70,14 @@ namespace Zamgune.UnityPipelineCompat
             }
             finally
             {
-                DeleteTemporaryCapture(temporaryPath, temporaryDirectory);
+                // A timed-out ScreenCapture request can still write after this command returns.
+                // Its Editor-update observer owns cleanup until the PNG is complete. If setup
+                // failed before ScreenCapture was requested, or the wait consumed a complete PNG,
+                // there is no possible late writer and cleanup is safe here.
+                if (!captureRequested || waitResult?.SourceSettled == true)
+                {
+                    TryDeleteTemporaryCapture(temporaryPath, temporaryDirectory);
+                }
             }
         }
 
@@ -104,16 +117,56 @@ namespace Zamgune.UnityPipelineCompat
             scaledHeight = maxHeight;
         }
 
-        private static ZamguneGameViewCaptureResponse BuildResponse(byte[] sourcePng, int maxHeight)
+        internal static bool HasCompletePngEnvelope(byte[] sourcePng)
         {
+            if (sourcePng == null || sourcePng.Length < 20)
+            {
+                return false;
+            }
+
+            int end = sourcePng.Length - 12;
+            return sourcePng[0] == 0x89 &&
+                   sourcePng[1] == 0x50 &&
+                   sourcePng[2] == 0x4E &&
+                   sourcePng[3] == 0x47 &&
+                   sourcePng[4] == 0x0D &&
+                   sourcePng[5] == 0x0A &&
+                   sourcePng[6] == 0x1A &&
+                   sourcePng[7] == 0x0A &&
+                   sourcePng[end] == 0x00 &&
+                   sourcePng[end + 1] == 0x00 &&
+                   sourcePng[end + 2] == 0x00 &&
+                   sourcePng[end + 3] == 0x00 &&
+                   sourcePng[end + 4] == 0x49 &&
+                   sourcePng[end + 5] == 0x45 &&
+                   sourcePng[end + 6] == 0x4E &&
+                   sourcePng[end + 7] == 0x44 &&
+                   sourcePng[end + 8] == 0xAE &&
+                   sourcePng[end + 9] == 0x42 &&
+                   sourcePng[end + 10] == 0x60 &&
+                   sourcePng[end + 11] == 0x82;
+        }
+
+        internal static bool TryBuildResponse(
+            byte[] sourcePng,
+            int maxHeight,
+            out ZamguneGameViewCaptureResponse response)
+        {
+            response = null;
+            if (!HasCompletePngEnvelope(sourcePng))
+            {
+                return false;
+            }
+
             var sourceTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
             try
             {
                 if (!sourceTexture.LoadImage(sourcePng, false))
                 {
-                    return ZamguneGameViewCaptureResponse.Fail(
-                        CaptureSource,
-                        "Unity returned screenshot bytes that could not be decoded as PNG.");
+                    // A writer can expose a stable file length before the image decoder can consume
+                    // it. Keep polling until the capture timeout instead of returning a false
+                    // terminal failure.
+                    return false;
                 }
 
                 GetScaledDimensionsToMaxHeight(
@@ -129,16 +182,18 @@ namespace Zamgune.UnityPipelineCompat
 
                 if (outputPng == null || outputPng.Length == 0)
                 {
-                    return ZamguneGameViewCaptureResponse.Fail(
+                    response = ZamguneGameViewCaptureResponse.Fail(
                         CaptureSource,
                         "Failed to encode the captured Game View as PNG.");
+                    return true;
                 }
 
-                return ZamguneGameViewCaptureResponse.Ok(
+                response = ZamguneGameViewCaptureResponse.Ok(
                     CaptureSource,
                     outputPng,
                     outputWidth,
                     outputHeight);
+                return true;
             }
             finally
             {
@@ -182,16 +237,18 @@ namespace Zamgune.UnityPipelineCompat
             }
         }
 
-        private static Task<ZamguneGameViewCaptureResponse> WaitForScreenshotResponseAsync(
+        private static Task<CaptureWaitResult> WaitForScreenshotResponseAsync(
             string path,
+            string directory,
             int maxHeight,
             TimeSpan timeout)
         {
             int editorMainThreadId = Thread.CurrentThread.ManagedThreadId;
-            var completion = new TaskCompletionSource<ZamguneGameViewCaptureResponse>(
+            var completion = new TaskCompletionSource<CaptureWaitResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             long previousLength = -1;
             int completionState = 0;
+            DateTime? lateCleanupDeadlineUtc = null;
             Timer timeoutTimer = null;
             EditorApplication.CallbackFunction updateCallback = null;
 
@@ -207,25 +264,73 @@ namespace Zamgune.UnityPipelineCompat
 
             void TryComplete(
                 ZamguneGameViewCaptureResponse response,
+                bool sourceSettled,
                 bool invokedFromEditorUpdate)
             {
                 bool wonCompletion = Interlocked.CompareExchange(ref completionState, 1, 0) == 0;
 
                 // Only the Editor update path may touch the EditorApplication event. If the timer
-                // wins, the next Editor update observes completionState and removes itself before
-                // polling the file or creating Unity textures.
-                if (invokedFromEditorUpdate)
+                // wins or Play Mode ends before the file settles, the callback stays registered as
+                // a bounded late-write observer. It deletes only a complete PNG; otherwise it
+                // leaves the staging path intact for a ScreenCapture request that may still write.
+                if (invokedFromEditorUpdate && sourceSettled)
                 {
                     UnsubscribeOnEditorMainThread();
                 }
 
                 if (!wonCompletion)
                 {
+                    if (invokedFromEditorUpdate && sourceSettled)
+                    {
+                        TryDeleteTemporaryCapture(path, directory);
+                    }
+
                     return;
                 }
 
                 timeoutTimer?.Dispose();
-                completion.TrySetResult(response);
+                completion.TrySetResult(new CaptureWaitResult(response, sourceSettled));
+            }
+
+            bool TryCleanupLateCapture()
+            {
+                try
+                {
+                    if (!File.Exists(path))
+                    {
+                        return false;
+                    }
+
+                    long currentLength = new FileInfo(path).Length;
+                    if (currentLength <= 0 || currentLength != previousLength)
+                    {
+                        previousLength = currentLength;
+                        return false;
+                    }
+
+                    byte[] bytes = File.ReadAllBytes(path);
+                    if (bytes.LongLength != currentLength || !HasCompletePngEnvelope(bytes))
+                    {
+                        return false;
+                    }
+
+                    return TryDeleteTemporaryCapture(path, directory);
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return false;
+                }
+                catch
+                {
+                    // Cleanup observation is best effort. Keep the staging path intact and let the
+                    // bounded observer unsubscribe at its deadline instead of surfacing an Editor
+                    // update exception after the command has already returned.
+                    return false;
+                }
             }
 
             updateCallback = () =>
@@ -237,7 +342,17 @@ namespace Zamgune.UnityPipelineCompat
 
                 if (Volatile.Read(ref completionState) != 0)
                 {
-                    UnsubscribeOnEditorMainThread();
+                    DateTime nowUtc = DateTime.UtcNow;
+                    if (!lateCleanupDeadlineUtc.HasValue)
+                    {
+                        lateCleanupDeadlineUtc = nowUtc + LateCaptureCleanupObservation;
+                    }
+
+                    if (TryCleanupLateCapture() || nowUtc >= lateCleanupDeadlineUtc.Value)
+                    {
+                        UnsubscribeOnEditorMainThread();
+                    }
+
                     return;
                 }
 
@@ -247,6 +362,7 @@ namespace Zamgune.UnityPipelineCompat
                         ZamguneGameViewCaptureResponse.Fail(
                             CaptureSource,
                             "The Editor left Play Mode while capturing the Game View."),
+                        sourceSettled: false,
                         invokedFromEditorUpdate: true);
                     return;
                 }
@@ -259,10 +375,12 @@ namespace Zamgune.UnityPipelineCompat
                         if (currentLength > 0 && currentLength == previousLength)
                         {
                             byte[] bytes = File.ReadAllBytes(path);
-                            if (bytes.LongLength == currentLength)
+                            if (bytes.LongLength == currentLength &&
+                                TryBuildResponse(bytes, maxHeight, out ZamguneGameViewCaptureResponse response))
                             {
                                 TryComplete(
-                                    BuildResponse(bytes, maxHeight),
+                                    response,
+                                    sourceSettled: true,
                                     invokedFromEditorUpdate: true);
                                 return;
                             }
@@ -285,6 +403,7 @@ namespace Zamgune.UnityPipelineCompat
                         ZamguneGameViewCaptureResponse.Fail(
                             CaptureSource,
                             $"Failed while reading the captured Game View: {ex.Message}"),
+                        sourceSettled: false,
                         invokedFromEditorUpdate: true);
                 }
             };
@@ -295,6 +414,7 @@ namespace Zamgune.UnityPipelineCompat
                     ZamguneGameViewCaptureResponse.Fail(
                         CaptureSource,
                         $"Game View screenshot was not ready within {timeout.TotalSeconds:0} seconds."),
+                    sourceSettled: false,
                     invokedFromEditorUpdate: false),
                 null,
                 timeout,
@@ -315,7 +435,7 @@ namespace Zamgune.UnityPipelineCompat
             return directory;
         }
 
-        private static void DeleteTemporaryCapture(string path, string directory)
+        private static bool TryDeleteTemporaryCapture(string path, string directory)
         {
             try
             {
@@ -330,10 +450,13 @@ namespace Zamgune.UnityPipelineCompat
                 {
                     Directory.Delete(directory);
                 }
+
+                return string.IsNullOrEmpty(path) || !File.Exists(path);
             }
             catch
             {
                 // Cleanup is best effort and must not replace the capture result with a secondary error.
+                return false;
             }
         }
 
@@ -347,6 +470,18 @@ namespace Zamgune.UnityPipelineCompat
 
             EditorWindow gameView = EditorWindow.GetWindow(gameViewType);
             gameView?.Repaint();
+        }
+
+        private sealed class CaptureWaitResult
+        {
+            public CaptureWaitResult(ZamguneGameViewCaptureResponse response, bool sourceSettled)
+            {
+                Response = response;
+                SourceSettled = sourceSettled;
+            }
+
+            public ZamguneGameViewCaptureResponse Response { get; }
+            public bool SourceSettled { get; }
         }
     }
 

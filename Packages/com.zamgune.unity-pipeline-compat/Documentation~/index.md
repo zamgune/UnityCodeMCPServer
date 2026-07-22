@@ -59,7 +59,10 @@ upscaled. The result reports `Success`, `Error`, PNG `Base64`, `Width`, `Height`
 
 The screenshot is staged in a unique directory below the project's `Temp` folder. No save-path
 argument is exposed. The temporary PNG is deleted after reading, and texture and render-texture
-state used for optional scaling is restored in `finally` cleanup.
+state used for optional scaling is restored in `finally` cleanup. Incomplete or not-yet-decodable
+PNG data remains pending until the five-second timeout. A timed-out request keeps its staging path
+available while a bounded Editor-update observer watches for and removes a complete late capture;
+it never removes an empty path ahead of Unity's pending screenshot writer.
 
 ## Response boundary
 

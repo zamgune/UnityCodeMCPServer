@@ -73,9 +73,12 @@ unity command --project-path /absolute/path/to/project --timeout 15 \
 
 `max_height` defaults to `640` and accepts values from `1` through `4096`. Captures taller than the
 limit are scaled proportionally without upscaling smaller images. The response contains `Success`,
-`Error`, `Base64`, `Width`, `Height`, `Bytes`, and `Source`. Screenshot files exist only under the
-Unity project's `Temp` directory while the command is running; the command exposes no output-path
-argument and deletes its temporary file after encoding the response.
+`Error`, `Base64`, `Width`, `Height`, `Bytes`, and `Source`. Screenshot files are staged only under
+the Unity project's `Temp` directory; the command exposes no output-path argument and deletes a
+successful capture after encoding the response. After a timeout, a bounded
+Editor-update observer keeps the staging path available for a late `ScreenCapture` write and removes
+the PNG only after it is complete; if no file arrives, the empty directory is left under `Temp`
+rather than being removed ahead of Unity's pending writer.
 
 ## Tests
 

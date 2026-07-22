@@ -1,7 +1,10 @@
+using System;
 using System.Reflection;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using Unity.Pipeline.Commands;
+using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace Zamgune.UnityPipelineCompat.Tests
 {
@@ -90,6 +93,95 @@ namespace Zamgune.UnityPipelineCompat.Tests
 
             Assert.That(scaledWidth, Is.EqualTo(expectedWidth));
             Assert.That(scaledHeight, Is.EqualTo(expectedHeight));
+        }
+
+        [Test]
+        public void TryBuildResponse_CompletePngReturnsPayload()
+        {
+            byte[] png = CreateTestPng();
+
+            bool settled = ZamguneGameViewCaptureCommand.TryBuildResponse(
+                png,
+                640,
+                out ZamguneGameViewCaptureResponse response);
+
+            Assert.That(settled, Is.True);
+            Assert.That(response, Is.Not.Null);
+            Assert.That(response.Success, Is.True);
+            Assert.That(response.Width, Is.EqualTo(2));
+            Assert.That(response.Height, Is.EqualTo(2));
+            Assert.That(response.Bytes, Is.EqualTo(png.Length));
+            Assert.That(Convert.FromBase64String(response.Base64), Is.EqualTo(png));
+        }
+
+        [Test]
+        public void TryBuildResponse_StableButIncompletePngRemainsPending()
+        {
+            byte[] png = CreateTestPng();
+            Array.Resize(ref png, png.Length - 1);
+
+            bool settled = ZamguneGameViewCaptureCommand.TryBuildResponse(
+                png,
+                640,
+                out ZamguneGameViewCaptureResponse response);
+
+            Assert.That(settled, Is.False);
+            Assert.That(response, Is.Null);
+            Assert.That(ZamguneGameViewCaptureCommand.HasCompletePngEnvelope(png), Is.False);
+        }
+
+        [Test]
+        public void HasCompletePngEnvelope_RejectsInvalidBytesWithPngEndMarker()
+        {
+            byte[] invalid =
+            {
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+                0xAE, 0x42, 0x60, 0x82
+            };
+
+            Assert.That(ZamguneGameViewCaptureCommand.HasCompletePngEnvelope(invalid), Is.False);
+        }
+
+        [Test]
+        public void TryBuildResponse_CompleteEnvelopeButUndecodablePngRemainsPending()
+        {
+            byte[] undecodable =
+            {
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+                0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+                0xAE, 0x42, 0x60, 0x82
+            };
+
+            bool settled = ZamguneGameViewCaptureCommand.TryBuildResponse(
+                undecodable,
+                640,
+                out ZamguneGameViewCaptureResponse response);
+
+            Assert.That(ZamguneGameViewCaptureCommand.HasCompletePngEnvelope(undecodable), Is.True);
+            Assert.That(settled, Is.False);
+            Assert.That(response, Is.Null);
+        }
+
+        private static byte[] CreateTestPng()
+        {
+            var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            try
+            {
+                texture.SetPixels(new[]
+                {
+                    Color.magenta,
+                    Color.cyan,
+                    Color.yellow,
+                    Color.black
+                });
+                texture.Apply(false, false);
+                return texture.EncodeToPNG();
+            }
+            finally
+            {
+                Object.DestroyImmediate(texture);
+            }
         }
     }
 }
