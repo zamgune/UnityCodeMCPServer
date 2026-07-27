@@ -121,6 +121,20 @@ per-project `unity mcp` entries in the same file; two MCP processes must never a
 Every tool then accepts an optional `project` argument, and the router adds `unity_router_status`,
 `unity_router_restart`, and `unity_auth_refresh` for diagnosing the auth layer.
 
+Claude Code registers the same router once, at user scope, so every project directory sees it:
+
+```sh
+claude mcp add -s user unity -- node /absolute/path/to/UnityCodeMCPServer/Tools/unity-mcp-router/unity-mcp-router.mjs --default UnityCodeMCPServer
+```
+
+Any agent that can run a shell can skip MCP registration entirely and use the router's one-shot CLI,
+which has no client-side tool timeout:
+
+```sh
+node Tools/unity-mcp-router/router-cli.mjs smoke SheepWolf
+node Tools/unity-mcp-router/router-cli.mjs call editor_status --project OhMyFarm
+```
+
 Registering `unity mcp` directly still works and remains the documented fallback — bind it to one
 canonical project path so another open Editor is never selected by accident:
 

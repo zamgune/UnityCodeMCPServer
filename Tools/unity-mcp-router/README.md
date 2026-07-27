@@ -81,6 +81,31 @@ args = [
 ]
 ```
 
+## Claude Code 등록
+
+한 번만 등록하면 모든 프로젝트 디렉터리에서 쓸 수 있다. 프로젝트 전환은 툴의 `project` 인자로 한다.
+
+```sh
+claude mcp add -s user unity -- node /Volumes/WD_1TB/ForkDefault/UnityCodeMCPServer/Tools/unity-mcp-router/unity-mcp-router.mjs --default UnityCodeMCPServer
+```
+
+되돌리려면 `claude mcp remove -s user unity`.
+
+## CLI (MCP 클라이언트 없이)
+
+`router-cli.mjs`는 라우터를 일회성으로 띄워 결과만 찍는다. MCP 등록도, 툴 타임아웃도 없어서
+셸을 쓸 수 있는 에이전트면 무엇이든 그대로 쓸 수 있다.
+
+```sh
+node router-cli.mjs smoke SheepWolf                     # 라우터 + Editor 검증, 실패 시 exit 1
+node router-cli.mjs list --project SheepWolf            # 툴 목록
+node router-cli.mjs call editor_status --project OhMyFarm
+node router-cli.mjs call eval '{"code":"..."}' --project SheepWolf --json
+```
+
+`--json`은 가공 없이 원본 result를 출력한다. `--project`를 주면 라우터의 기본 프로젝트까지 같이 바뀌므로
+`list`도 해당 프로젝트의 툴을 보여준다.
+
 ## 사용
 
 기존 Pipeline 툴(`editor_status`, `eval`, `run_tests`, `capture_game_view`, `zamgune_play_*` …)은 이름과 인자가 그대로다. 다른 프로젝트를 대상으로 하려면 `project`만 추가한다.
