@@ -17,8 +17,9 @@ Codex에 서버 **1개**만 등록하고, 툴 호출 시 `project` 인자로 프
 | --- | --- |
 | 응답에 401 / Unauthorized / token expired | `unity auth status`로 자격증명 갱신 → 자식 재시작 → **같은 인자로 1회 재시도** (클라이언트는 모름) |
 | 로그아웃 상태 | 재시도 대신 `unity auth login` 실행하라는 명확한 메시지 반환 |
-| Editor 미연결 / ECONNREFUSED | `unity command --project-path`로 프로브 → 재시작 후 재시도, 실패 시 체크리스트 반환 |
-| 유휴 시간 | 20분마다 `unity auth status`를 돌려 캐시된 토큰을 미리 데워 둠 |
+| Editor 미연결 / ECONNREFUSED / `No Pipeline instance found` | `unity command --project-path`로 프로브 → 재시작 후 재시도, 실패 시 체크리스트 반환 |
+| 클라이언트 시작 시 Editor가 닫혀 있었음 | `unity mcp`는 Editor 없이도 뜨고 툴 목록을 **비워서** 준다. 라우터는 그 목록을 캐시하지 않고, 나중에 툴이 생기면 `notifications/tools/list_changed`를 보낸다 |
+| 유휴 시간 | 20분마다 `unity auth status`로 토큰을 데우고, 툴 목록이 비어 있으면 다시 조회 |
 
 툴 스키마는 Unity 것을 그대로 통과시킨다. 라우터가 추가하는 건 각 툴의 선택적 `project` 인자뿐이다.
 
@@ -105,6 +106,12 @@ node router-cli.mjs call eval '{"code":"..."}' --project SheepWolf --json
 
 `--json`은 가공 없이 원본 result를 출력한다. `--project`를 주면 라우터의 기본 프로젝트까지 같이 바뀌므로
 `list`도 해당 프로젝트의 툴을 보여준다.
+
+Editor 없이 돌릴 수 있는 유일한 검사는 실패 분류 테이블이다. 패턴을 고쳤으면 이걸 돌려라.
+
+```sh
+node unity-mcp-router.mjs --self-check
+```
 
 ## 사용
 

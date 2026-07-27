@@ -152,8 +152,33 @@ const EDITOR_PATTERNS = [
   /connection\s+(?:refused|reset|closed)/i,
   /ECONNREFUSED|ECONNRESET|EPIPE/,
   /pipeline\s+(?:package\s+)?not\s+(?:installed|found)/i,
+  /no\s+pipeline\s+instance/i,
+  /make\s+sure\s+.*editor\s+is\s+running/i,
   /failed\s+to\s+(?:reach|attach\s+to)\s+.*editor/i,
 ];
+
+// Real messages seen from `unity mcp` / `unity command`, asserted by --self-check.
+const CLASSIFY_SAMPLES = [
+  ['No Pipeline instance found for project: /p. Make sure Unity Editor is running with the Pipeline package installed.', 'editor'],
+  ['connect ECONNREFUSED 127.0.0.1:9002', 'editor'],
+  ['Unity Editor is not connected', 'editor'],
+  ['Request failed with status code 401 Unauthorized', 'auth'],
+  ['The access token has expired', 'auth'],
+  ['Compilation failed: CS1002 expected ;', null],
+];
+
+function selfCheck() {
+  let failed = 0;
+  for (const [message, want] of CLASSIFY_SAMPLES) {
+    const got = classifyFailure({ result: { isError: true, content: [{ type: 'text', text: message }] } });
+    if (got !== want) {
+      failed++;
+      process.stdout.write(`FAIL want=${want} got=${got}: ${message}\n`);
+    }
+  }
+  process.stdout.write(failed ? `\n${failed} failed\n` : `classifyFailure: ${CLASSIFY_SAMPLES.length} ok\n`);
+  process.exit(failed ? 1 : 0);
+}
 
 function textOf(payload) {
   const parts = [];
@@ -542,8 +567,25 @@ async function listTools() {
   const res = await child.request({ jsonrpc: '2.0', method: 'tools/list', params: {} }, CONFIG.startupTimeoutSec * 1000);
   if (res.error) throw new Error(JSON.stringify(res.error));
   const tools = decorateTools(res.result?.tools ?? []);
-  cachedTools = { tools: [...tools, ...ROUTER_TOOLS] };
-  return cachedTools;
+  const list = { tools: [...tools, ...ROUTER_TOOLS] };
+  // `unity mcp` starts fine with no Editor attached and answers with zero Unity tools. Caching that
+  // would leave the client session holding only the router's own tools for as long as it runs.
+  cachedTools = tools.length ? list : null;
+  return list;
+}
+
+/** Re-list after the Editor may have come up, and tell the client if the Unity tools appeared. */
+async function refreshToolsIfEmpty() {
+  if (cachedTools) return;
+  try {
+    const list = await listTools();
+    if (list.tools.length > ROUTER_TOOLS.length) {
+      log('info', 'unity tools became available', { count: list.tools.length });
+      writeOut({ jsonrpc: '2.0', method: 'notifications/tools/list_changed', params: {} });
+    }
+  } catch (err) {
+    log('debug', 'tool list still unavailable', { message: err.message });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -692,6 +734,8 @@ async function handleMessage(msg) {
 
         if (ROUTER_TOOLS.some((t) => t.name === toolName)) {
           reply(id, await callRouterTool(toolName, params?.arguments ?? {}));
+          // A stuck client calls a router tool first; use that as the cue to re-check the Editor.
+          refreshToolsIfEmpty();
           return;
         }
 
@@ -747,6 +791,8 @@ async function handleMessage(msg) {
 
 // ---- stdin framing -------------------------------------------------------
 
+if (process.argv.includes('--self-check')) selfCheck();
+
 let stdinBuffer = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
@@ -774,6 +820,7 @@ process.stdin.on('end', () => shutdown(0));
 if (CONFIG.reauthIntervalMin > 0) {
   const timer = setInterval(() => {
     refreshAuth().catch(() => {});
+    refreshToolsIfEmpty();
   }, CONFIG.reauthIntervalMin * 60_000);
   timer.unref();
 }
