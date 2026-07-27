@@ -1,0 +1,28 @@
+{
+  "_readme": "Copy to unity-mcp-router.config.json and adjust the absolute paths for this machine. The copy is gitignored because paths differ per machine, exactly like .codex/config.toml.",
+  "unityBin": "/Users/zamgune/.unity/bin/unity",
+  "defaultProject": "UnityCodeMCPServer",
+  "projects": [
+    {
+      "name": "UnityCodeMCPServer",
+      "path": "/Volumes/WD_1TB/ForkDefault/UnityCodeMCPServer"
+    },
+    {
+      "name": "SlashNClaim",
+      "path": "/Volumes/WD_1TB/ForkDefault/SlashNClaim"
+    },
+    {
+      "name": "OhMyFarm",
+      "path": "/Volumes/WD_1TB/ForkDefault/OhMyFarm"
+    },
+    {
+      "name": "SheepWolf",
+      "path": "/Volumes/WD_1TB/PuzzleGameFoundations/Sheep-Wolf"
+    }
+  ],
+  "_note": "UnityCodeMCPServer is the compat package's source project and embeds the package directly. The other three consume it over git at a pinned SHA.",
+  "toolTimeoutSec": 300,
+  "startupTimeoutSec": 60,
+  "reauthIntervalMin": 20,
+  "maxRetries": 1
+}

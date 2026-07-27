@@ -5,15 +5,22 @@ description: Use for Unity Editor automation, tests, timed InputAction play, and
 
 # Unity Official Pipeline
 
-Use Unity's official CLI MCP for this repository. Bind every process to the exact project path:
+Use Unity's official CLI MCP for this repository, registered through `Tools/unity-mcp-router` so an
+expired Unity Cloud token cannot strand the session:
 
 ```toml
-[mcp_servers.unity_codemcp]
-command = "/absolute/path/to/unity"
-args = ["mcp", "--project-path", "/absolute/path/to/UnityCodeMCPServer"]
-startup_timeout_sec = 60
+[mcp_servers.unity]
+command = "node"
+args = [
+  "/absolute/path/to/UnityCodeMCPServer/Tools/unity-mcp-router/unity-mcp-router.mjs",
+  "--default", "UnityCodeMCPServer",
+]
+startup_timeout_sec = 90
 tool_timeout_sec = 300
 ```
+
+Every tool takes an optional `project` argument selecting which Unity project to target; it defaults
+to the router's configured default. Omit it unless working across projects.
 
 ## Command map
 
@@ -29,6 +36,9 @@ tool_timeout_sec = 300
 | Advance with named InputActions | `zamgune_play_step` |
 | Final capture including overlay UI | `zamgune_capture_game_view` |
 | End deterministic play and restore state | `zamgune_play_end` |
+| Router, child process, and auth state | `unity_router_status` |
+| Force-restart a stuck `unity mcp` child | `unity_router_restart` |
+| Refresh the Unity Cloud credential | `unity_auth_refresh` |
 
 ## Workflow
 
@@ -66,6 +76,11 @@ Example timed step:
 - Do not issue duplicate mutation calls during compile or domain reload.
 - A transport timeout, stale MCP token, modal dialog, dirty scene, or stalled Test Runner is not a
   pass.
+- On `401 Unauthorized`, do not ask the user to restart the MCP session. The router refreshes the
+  credential, restarts `unity mcp`, and retries once on its own. If a 401 still surfaces, it means
+  the CLI is signed out: call `unity_router_status`, then tell the user to run `unity auth login`.
+- On a "no Editor connected" failure, confirm the target project's Editor is open and done
+  compiling before retrying. The router restores authentication, never the Editor process.
 - Preserve unrelated scenes, assets, settings, and user files.
 - The official path depends on no Python, uv, UniTask, settings asset, copied bridge, or background
   file watcher. This repository still compiles the rollback-only legacy source, whose idle watcher

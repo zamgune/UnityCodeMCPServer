@@ -1,5 +1,35 @@
-[mcp_servers.unity_codemcp]
-command = "/Users/zamgune/.unity/bin/unity"
-args = ["mcp", "--project-path", "/Volumes/WD_1TB/ForkDefault/UnityCodeMCPServer"]
-startup_timeout_sec = 60
+# Copy to .codex/config.toml (gitignored) and adjust the absolute paths for this machine.
+#
+# Register the router, not `unity mcp` directly. `unity mcp` holds the Unity Cloud
+# token it read at startup; once that token expires the process returns 401 for the
+# rest of its life, and an MCP client cannot restart a server mid-session. The router
+# owns that child process, so it can refresh the credential, restart it, and retry
+# the call transparently.
+#
+# Requires Tools/unity-mcp-router/unity-mcp-router.config.json (copy the .example).
+
+[mcp_servers.unity]
+command = "node"
+args = [
+  "/Volumes/WD_1TB/ForkDefault/UnityCodeMCPServer/Tools/unity-mcp-router/unity-mcp-router.mjs",
+  "--default",
+  "UnityCodeMCPServer",
+]
+startup_timeout_sec = 90
 tool_timeout_sec = 300
+
+# Never let two MCP processes attach to the same Editor.
+[mcp_servers.unity_codemcp]
+enabled = false
+
+[mcp_servers.unity_slashnclaim]
+enabled = false
+
+[mcp_servers.unity_ohmyfarm]
+enabled = false
+
+[mcp_servers.unity_sheep_wolf]
+enabled = false
+
+[mcp_servers.unity_pajiready]
+enabled = false

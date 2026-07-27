@@ -86,5 +86,8 @@ UnityCodeMcpServerLog.log
 .mcp.json
 /.codex/config.toml
 
+# Router config holds machine-specific absolute paths; commit the .example instead
+/Tools/unity-mcp-router/unity-mcp-router.config.json
+
 # MCP file-transport runtime messages
 .unityCodeMcpServer/messages/

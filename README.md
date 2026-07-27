@@ -22,6 +22,10 @@ default installation.
 | `com.unity.pipeline` | `0.3.1-exp.1` | Editor command surface |
 | `com.zamgune.unity-pipeline-compat` | `0.2.0` | Timed input and composed capture only |
 | Input System | `1.19.0` | Named InputAction injection |
+| `Tools/unity-mcp-router` | `1.0.0` | stdio proxy; token refresh and child restart |
+
+The router is a repository tool, not part of the UPM package. Changing it does not require a
+`com.zamgune.unity-pipeline-compat` version bump or a manifest update in consuming projects.
 
 Unity CLI is beta and Pipeline is experimental. Pin these versions when reproducing the validated
 setup instead of silently accepting a newer release.
@@ -78,13 +82,47 @@ keep the Git tag or replace it with an audited commit SHA; do not depend on a mo
 No Python, uv, UniTask, settings asset, copied bridge, or background file watcher is used by this
 path.
 
-### 4. Register the official MCP server
+### 4. Register the MCP server through the router
 
-Always bind the MCP process to one canonical project path. This prevents another open Unity Editor
-from being selected accidentally.
+`unity mcp` is Unity's official MCP server and it already speaks stdio, so transport was never the
+weak point. Process lifetime is. The server reads the Unity Cloud token that `unity auth login`
+cached and holds it for as long as it runs; once that token expires it returns `401 Unauthorized`
+for the rest of its life. MCP clients cannot restart a server mid-session, so the session stays
+dead until the user restarts the whole client.
 
-For Codex, add a project-local `.codex/config.toml` using the absolute path returned by
-`command -v unity` on macOS/Linux or the resolved executable path on Windows:
+[`Tools/unity-mcp-router`](Tools/unity-mcp-router/README.md) closes that gap. It is a dependency-free
+Node stdio proxy that owns the `unity mcp` child process, so it can refresh the credential, restart
+the child, and retry the call without the client noticing. It also spawns one child per project, so
+a single registered server can drive every Unity project here.
+
+Copy both machine-local files, then register the router:
+
+```sh
+cp Tools/unity-mcp-router/unity-mcp-router.config{.example,}.json
+cp .codex/config.toml{.example,}
+```
+
+Edit the copied config so each project name maps to an absolute path, then:
+
+```toml
+[mcp_servers.unity]
+command = "node"
+args = [
+  "/absolute/path/to/UnityCodeMCPServer/Tools/unity-mcp-router/unity-mcp-router.mjs",
+  "--default", "UnityCodeMCPServer",
+]
+startup_timeout_sec = 90
+tool_timeout_sec = 300
+```
+
+Both copies are gitignored so another machine can use its own absolute paths. Disable any older
+per-project `unity mcp` entries in the same file; two MCP processes must never attach to one Editor.
+
+Every tool then accepts an optional `project` argument, and the router adds `unity_router_status`,
+`unity_router_restart`, and `unity_auth_refresh` for diagnosing the auth layer.
+
+Registering `unity mcp` directly still works and remains the documented fallback — bind it to one
+canonical project path so another open Editor is never selected by accident:
 
 ```toml
 [mcp_servers.unity_my_project]
@@ -94,18 +132,8 @@ startup_timeout_sec = 60
 tool_timeout_sec = 300
 ```
 
-This repository includes a canonical Mac example at
-[`/.codex/config.toml.example`](.codex/config.toml.example). Copy it to `.codex/config.toml` for
-the local checkout; the active file is ignored so another machine can use its own absolute paths.
-
-Unity CLI can list supported client configuration targets with:
-
-```sh
-unity mcp configure --list
-```
-
-Inspect generated client configuration before committing it. The MCP client must ultimately launch
-`unity mcp --project-path <canonical-project-path>`.
+Unity CLI can list supported client configuration targets with `unity mcp configure --list`.
+Inspect generated client configuration before committing it.
 
 ### 5. Verify the target Editor
 
@@ -130,6 +158,9 @@ Editor, and `compiling=false` before any mutation.
 | Control Play Mode | `editor_play`, `editor_pause`, `editor_stop` |
 | Capture camera or Scene view | `capture_game_view`, `capture_scene_view` |
 | Discover custom project commands | `unity command --project-path <path>` |
+| Inspect router and auth state | `unity_router_status` |
+| Force-restart a stuck `unity mcp` child | `unity_router_restart` |
+| Refresh the Unity Cloud credential | `unity_auth_refresh` |
 
 Use typed commands before `eval`. Use normal file tools for source, JSON, YAML, and serialized
 asset edits; `eval` is for live Editor inspection or a deliberately scoped Editor API action.
