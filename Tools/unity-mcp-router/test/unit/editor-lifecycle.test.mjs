@@ -103,6 +103,35 @@ test('target already ready completes without close, stop, or open side effects',
   assert(Object.isFrozen(stateChanges.at(-1)));
 });
 
+test('an exact missing-tool code for the expected lifecycle tool falls back to editor_status', async (t) => {
+  const calls = [];
+  const sideEffects = [];
+  const { lifecycle, journal } = await fixture(t, {
+    processAudit: async () => ({ ok: true, editors: [TARGET_EDITOR] }),
+    callTool: async (_project, name) => {
+      calls.push(name);
+      if (name === 'zamgune_handoff_status') {
+        const error = new Error('catalog-proven missing lifecycle tool');
+        error.code = 'TOOL_NOT_FOUND';
+        error.toolName = name;
+        throw error;
+      }
+      assert.equal(name, 'editor_status');
+      return { ready: true, projectPath: PROJECT_B.path, playMode: 'stopped' };
+    },
+    stopChild: async () => sideEffects.push('stop'),
+    openProject: async () => sideEffects.push('open'),
+  });
+
+  const queued = await lifecycle.ensureProject(PROJECT_B);
+  const completed = await waitForState(lifecycle, queued.operationId, EDITOR_HANDOFF_STATES.COMPLETED);
+
+  assert.deepEqual(calls, ['zamgune_handoff_status', 'editor_status']);
+  assert.deepEqual(sideEffects, []);
+  assert.equal(completed.oldEditor, null);
+  assert.equal(journal.get(queued.operationId).state, 'COMPLETED');
+});
+
 test('a domain not-found error is not mistaken for an unavailable lifecycle tool', async (t) => {
   const calls = [];
   const { lifecycle } = await fixture(t, {

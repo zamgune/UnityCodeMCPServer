@@ -216,25 +216,10 @@ function projectByPath(config, projectPath) {
   return config.projects?.find((project) => canonicalPath(project.path) === expected) ?? null;
 }
 
-function regexEscape(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function isUnavailableTool(error, expectedName) {
+  if (error?.toolName !== expectedName) return false;
   const code = String(error?.code ?? '');
-  if (code === '-32601' || code === 'METHOD_NOT_FOUND' || code === 'TOOL_NOT_FOUND') return true;
-  if (typeof expectedName !== 'string' || expectedName.length === 0) return false;
-  const name = regexEscape(expectedName);
-  const quotedName = `["'\u0060]?${name}["'\u0060]?`;
-  const patterns = [
-    new RegExp(`^(?:error\\s*:\\s*)?(?:mcp\\s+)?tool\\s+not\\s+found\\s*:\\s*${quotedName}(?:\\s*[.!]|\\s*$)`, 'i'),
-    new RegExp(`^(?:error\\s*:\\s*)?unknown\\s+(?:mcp\\s+)?tool\\s*:?\\s*${quotedName}(?:\\s*[.!]|\\s*$)`, 'i'),
-    new RegExp(`^(?:error\\s*:\\s*)?no\\s+such\\s+(?:mcp\\s+)?tool\\s*:?\\s*${quotedName}(?:\\s*[.!]|\\s*$)`, 'i'),
-    new RegExp(`^(?:error\\s*:\\s*)?(?:mcp\\s+)?tool\\s+${quotedName}\\s+(?:was\\s+)?not\\s+found(?:\\s*[.!]|\\s*$)`, 'i'),
-  ];
-  return String(error?.message ?? '').split(/\r?\n/)
-    .map((line) => line.trim())
-    .some((line) => patterns.some((pattern) => pattern.test(line)));
+  return code === '-32601' || code === 'METHOD_NOT_FOUND' || code === 'TOOL_NOT_FOUND';
 }
 
 /**

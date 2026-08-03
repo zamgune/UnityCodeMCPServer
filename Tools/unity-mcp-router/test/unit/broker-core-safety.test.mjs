@@ -5,12 +5,47 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { BrokerCore, isValidToolCatalog } from '../../lib/broker-core.mjs';
+import { BrokerCore, catalogProvesToolAbsent, isValidToolCatalog } from '../../lib/broker-core.mjs';
 import { normalizeConfig } from '../../lib/config.mjs';
 import { OperationJournal } from '../../lib/operation-journal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const FAKE_UNITY = path.join(ROOT, 'test/fixtures/fake-unity.mjs');
+
+test('lifecycle catalog absence proof requires one complete non-empty valid catalog', () => {
+  const editorStatus = {
+    name: 'editor_status',
+    inputSchema: { type: 'object', properties: {} },
+  };
+  const typedStatus = {
+    name: 'zamgune_handoff_status',
+    inputSchema: { type: 'object', properties: {} },
+  };
+  const missing = { result: { tools: [editorStatus] } };
+  const stable = {
+    processGenerationBefore: 3,
+    processGenerationAfter: 3,
+    invalidationEpochBefore: 7,
+    invalidationEpochAfter: 7,
+  };
+
+  assert.equal(catalogProvesToolAbsent(missing, 'zamgune_handoff_status', stable), true);
+  assert.equal(catalogProvesToolAbsent({ result: { tools: [editorStatus, typedStatus] } },
+    'zamgune_handoff_status', stable), false);
+  assert.equal(catalogProvesToolAbsent({ result: { tools: [] } }, 'zamgune_handoff_status', stable), false);
+  assert.equal(catalogProvesToolAbsent({ result: { tools: [{}] } }, 'zamgune_handoff_status', stable), false);
+  assert.equal(catalogProvesToolAbsent({ result: { tools: [editorStatus], nextCursor: 'more' } },
+    'zamgune_handoff_status', stable), false);
+  assert.equal(catalogProvesToolAbsent({ error: { code: -32000 } }, 'zamgune_handoff_status', stable), false);
+  assert.equal(catalogProvesToolAbsent({ transportFailure: true, result: missing.result },
+    'zamgune_handoff_status', stable), false);
+  assert.equal(catalogProvesToolAbsent(missing, 'zamgune_handoff_status', {
+    ...stable, processGenerationAfter: 4,
+  }), false);
+  assert.equal(catalogProvesToolAbsent(missing, 'zamgune_handoff_status', {
+    ...stable, invalidationEpochAfter: 8,
+  }), false);
+});
 
 async function fixture(t, {
   projects = ['A'],
@@ -459,7 +494,139 @@ test('manual same-target handoff falls back when official MCP reports a missing 
     event.name === 'zamgune_handoff_status').length, 1);
   assert.equal(events.filter((event) => event.kind === 'call-start' &&
     event.name === 'editor_status').length, 1);
+  assert.equal(events.filter((event) => event.kind === 'tools-list').length, 1);
   assert.equal(events.some((event) => event.kind === 'mutation'), false);
+});
+
+test('parser-shaped lifecycle errors stay fail-closed without stable catalog absence proof', async (t) => {
+  for (const catalogMode of ['present', 'empty', 'malformed', 'error']) {
+    await t.test(catalogMode, async (t) => {
+      const harness = await fixture(t, {
+        license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+      });
+      const journal = await OperationJournal.open(harness.config.broker.journalFile);
+      const exactEditor = { pid: 781, projectPath: harness.config.projects[0].path };
+      const core = new BrokerCore({
+        config: harness.config,
+        journal,
+        env: {
+          ...process.env,
+          FAKE_UNITY_STATE_FILE: harness.stateFile,
+          FAKE_UNITY_VERSION: '1.0.0-beta.3',
+          FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE: '1',
+          FAKE_UNITY_HANDOFF_STATUS_ERROR_SHAPE: 'parser-match',
+          FAKE_UNITY_HANDOFF_STATUS_CATALOG_MODE: catalogMode,
+        },
+        processAuditor: async () => ({ ok: true, findings: [], editors: [exactEditor] }),
+        toolRefreshIntervalMs: 0,
+      });
+      t.after(() => core.close());
+      const admin = attach(core, 'A', { clientId: `catalog-negative-${catalogMode}`, isAdmin: true });
+      await admin.request(1, 'initialize', {
+        protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+      });
+
+      const started = await admin.request(2, 'tools/call', {
+        name: 'unity_router_editor_use', arguments: { project: 'A' },
+      });
+      const operationId = started.result.structuredContent.operationId;
+      await waitUntil(async () => {
+        const contents = await readFile(harness.stateFile, 'utf8').catch(() => '');
+        return contents.includes('"kind":"tools-list"');
+      });
+      await waitUntil(() => core.editorLifecycle.status(operationId)?.state === 'WAITING_PIPELINE');
+
+      const events = (await readFile(harness.stateFile, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      assert.equal(events.some((event) => event.kind === 'call-start' &&
+        event.name === 'editor_status'), false);
+      assert.deepEqual(core.editorLifecycle.status(operationId).blockers, ['EDITOR_LIFECYCLE_TOOL_ERROR']);
+    });
+  }
+});
+
+test('list_changed during lifecycle catalog proof prevents fallback', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const exactEditor = { pid: 782, projectPath: harness.config.projects[0].path };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: {
+      ...process.env,
+      FAKE_UNITY_STATE_FILE: harness.stateFile,
+      FAKE_UNITY_VERSION: '1.0.0-beta.3',
+      FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE: '1',
+      FAKE_UNITY_HANDOFF_STATUS_ERROR_SHAPE: 'parser-match',
+      FAKE_UNITY_NOTIFY_DURING_TOOLS_LIST_ONCE: '1',
+      FAKE_UNITY_TOOLS_LIST_DELAY_MS: '90',
+    },
+    processAuditor: async () => ({ ok: true, findings: [], editors: [exactEditor] }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const admin = attach(core, 'A', { clientId: 'catalog-list-changed-negative', isAdmin: true });
+  await admin.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const started = await admin.request(2, 'tools/call', {
+    name: 'unity_router_editor_use', arguments: { project: 'A' },
+  });
+  const operationId = started.result.structuredContent.operationId;
+  await waitUntil(() => core.editorLifecycle.status(operationId)?.state === 'WAITING_PIPELINE');
+  const events = (await readFile(harness.stateFile, 'utf8'))
+    .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+
+  assert(events.some((event) => event.kind === 'tools-list-notify-once'));
+  assert.equal(events.some((event) => event.kind === 'call-start' && event.name === 'editor_status'), false);
+  assert.deepEqual(core.editorLifecycle.status(operationId).blockers, ['EDITOR_LIFECYCLE_TOOL_ERROR']);
+});
+
+test('a wedged lifecycle catalog proof is bounded and never enables fallback', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const exactEditor = { pid: 783, projectPath: harness.config.projects[0].path };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: {
+      ...process.env,
+      FAKE_UNITY_STATE_FILE: harness.stateFile,
+      FAKE_UNITY_VERSION: '1.0.0-beta.3',
+      FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE: '1',
+      FAKE_UNITY_HANDOFF_STATUS_ERROR_SHAPE: 'parser-match',
+      FAKE_UNITY_TOOLS_LIST_DELAY_MS: '10000',
+    },
+    processAuditor: async () => ({ ok: true, findings: [], editors: [exactEditor] }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const admin = attach(core, 'A', { clientId: 'catalog-timeout-negative', isAdmin: true });
+  await admin.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const before = Date.now();
+  await admin.request(2, 'tools/call', {
+    name: 'unity_router_editor_use', arguments: { project: 'A' },
+  });
+  await waitUntil(async () => {
+    const contents = await readFile(harness.stateFile, 'utf8').catch(() => '');
+    const observed = contents.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    return observed.filter((event) => event.kind === 'call-start' &&
+      event.name === 'zamgune_handoff_status').length >= 2;
+  }, 6_500);
+  const elapsedMs = Date.now() - before;
+  const events = (await readFile(harness.stateFile, 'utf8'))
+    .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+
+  assert(elapsedMs < 6_500, `catalog proof exceeded its bounded retry window: ${elapsedMs}ms`);
+  assert.equal(events.some((event) => event.kind === 'call-start' && event.name === 'editor_status'), false);
 });
 
 test('floating validation turn preserves the legacy lease-only guard without Editor handoff', async (t) => {

@@ -214,6 +214,16 @@ async function handle(message) {
   }
   if (message.method === 'tools/list') {
     record('tools-list', { projectPath });
+    const handoffCatalogMode = process.env.FAKE_UNITY_HANDOFF_STATUS_CATALOG_MODE ?? 'missing';
+    if (handoffCatalogMode === 'error') {
+      record('tools-list-error', { projectPath, lifecycleProof: true });
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: -32099, message: 'Fake lifecycle catalog error' },
+      });
+      return;
+    }
     const toolsErrorGate = process.env.FAKE_UNITY_TOOLS_ERROR_GATE_FILE;
     if (toolsErrorGate && existsSync(toolsErrorGate)) {
       record('tools-list-error', { projectPath });
@@ -255,7 +265,19 @@ async function handle(message) {
         ? { ...tool, description: `Fake safe read ${catalogVersion}` }
         : tool)
       : tools;
-    result(message.id, { tools: gate && !existsSync(gate) ? [] : listedTools });
+    const handoffStatusTool = {
+      name: 'zamgune_handoff_status',
+      description: 'Fake typed handoff read',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    };
+    const proofCatalog = handoffCatalogMode === 'present'
+      ? [...listedTools, handoffStatusTool]
+      : handoffCatalogMode === 'empty'
+        ? []
+        : handoffCatalogMode === 'malformed'
+          ? [{}]
+          : listedTools;
+    result(message.id, { tools: gate && !existsSync(gate) ? [] : proofCatalog });
     return;
   }
   if (
@@ -418,8 +440,14 @@ async function handle(message) {
   }
   if (name === 'zamgune_handoff_status' && process.env.FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE === '1') {
     record('call-end', { id: message.id, name, projectPath, unavailable: true });
+    const errorText = process.env.FAKE_UNITY_HANDOFF_STATUS_ERROR_SHAPE === 'parser-match'
+      ? 'Tool not found: zamgune_handoff_status'
+      : JSON.stringify({
+        error: 'Command Not Found',
+        errorDetails: "No command named 'zamgune_handoff_status' is available. Available: [editor_status]",
+      });
     result(message.id, {
-      content: [{ type: 'text', text: 'Tool not found: zamgune_handoff_status' }],
+      content: [{ type: 'text', text: errorText }],
       isError: true,
     });
     return;

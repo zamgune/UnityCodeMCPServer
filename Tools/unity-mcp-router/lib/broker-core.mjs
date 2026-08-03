@@ -31,6 +31,7 @@ const SAFE_FORWARDED_METHODS = new Set(['resources/read', 'prompts/get', 'comple
 const DELIVERY_ACK_TIMEOUT_MS = 5_000;
 const TOOL_CATALOG_RECOVERY_GRACE_MS = 10_000;
 const TOOL_CATALOG_RECOVERY_POLL_MS = 200;
+const LIFECYCLE_CATALOG_PROOF_TIMEOUT_MS = 2_000;
 
 function textResult(text, isError = false, structuredContent = undefined) {
   return {
@@ -123,6 +124,27 @@ export function isValidToolCatalog(tools) {
     names.add(tool.name);
   }
   return true;
+}
+
+export function catalogProvesToolAbsent(response, toolName, {
+  processGenerationBefore,
+  processGenerationAfter,
+  invalidationEpochBefore,
+  invalidationEpochAfter,
+} = {}) {
+  if (response?.transportFailure || response?.error) return false;
+  if (typeof toolName !== 'string' || toolName.length === 0) return false;
+  if (!Number.isSafeInteger(processGenerationBefore) || processGenerationBefore !== processGenerationAfter) {
+    return false;
+  }
+  if (!Number.isSafeInteger(invalidationEpochBefore) || invalidationEpochBefore !== invalidationEpochAfter) {
+    return false;
+  }
+  if (response?.result?.nextCursor != null) return false;
+  const catalog = response?.result?.tools;
+  return isValidToolCatalog(catalog)
+    && catalog.length > 0
+    && !catalog.some((tool) => tool.name === toolName);
 }
 
 function responseLooksCancelled(response) {
@@ -2489,27 +2511,26 @@ export class BrokerCore {
     const child = this.childFor(project);
     const deadlineAt = Date.now() + Math.max(1, timeoutMs);
     const clientInfo = { name: 'unity-mcp-router-editor-lifecycle', version: SERVER_VERSION };
-    await child.start(PROTOCOL_VERSION, clientInfo, {
+    const requestContext = {
       connectionId: 'editor-lifecycle',
       clientRequestId: name,
       protocolVersion: PROTOCOL_VERSION,
       clientInfo,
       deadlineAt,
       startupTimeoutMs: Math.min(this.config.startupTimeoutSec * 1000, timeoutMs),
-    });
+    };
+    await child.start(PROTOCOL_VERSION, clientInfo, requestContext);
+    const processGenerationBefore = child.processGeneration;
+    const invalidationEpochBefore = this.#toolInvalidationEpoch(project.key);
     const response = await child.request('tools/call', { name, arguments: args }, timeoutMs, {
-      connectionId: 'editor-lifecycle',
-      clientRequestId: name,
-      protocolVersion: PROTOCOL_VERSION,
-      clientInfo,
+      ...requestContext,
       requireAlreadyStarted: true,
-      deadlineAt,
-      startupTimeoutMs: Math.min(this.config.startupTimeoutSec * 1000, timeoutMs),
     });
     if (response.transportFailure || response.error) {
       const error = new Error(response.error?.message ?? `Unity lifecycle tool ${name} failed`);
       error.code = String(response.error?.code ?? 'EDITOR_LIFECYCLE_TRANSPORT_FAILED');
       error.dispatched = response.dispatched;
+      error.toolName = name;
       throw error;
     }
     if (response.result?.isError === true) {
@@ -2517,6 +2538,28 @@ export class BrokerCore {
       const error = new Error(detail || `Unity lifecycle tool ${name} returned an error result`);
       error.code = response.result?.structuredContent?.code ?? 'EDITOR_LIFECYCLE_TOOL_ERROR';
       error.toolName = name;
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs > 0) {
+        try {
+          const proofTimeoutMs = Math.min(remainingMs, LIFECYCLE_CATALOG_PROOF_TIMEOUT_MS);
+          const catalogResponse = await child.request('tools/list', {}, proofTimeoutMs, {
+            ...requestContext,
+            clientRequestId: `${name}:catalog-proof`,
+            requireAlreadyStarted: true,
+          });
+          if (catalogProvesToolAbsent(catalogResponse, name, {
+            processGenerationBefore,
+            processGenerationAfter: child.processGeneration,
+            invalidationEpochBefore,
+            invalidationEpochAfter: this.#toolInvalidationEpoch(project.key),
+          })) {
+            error.code = 'TOOL_NOT_FOUND';
+          }
+        } catch {
+          // Catalog proof is optional. Preserve the original lifecycle error
+          // whenever absence cannot be established from one complete response.
+        }
+      }
       throw error;
     }
     return response.result;
