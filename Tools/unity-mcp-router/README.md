@@ -14,15 +14,15 @@ flowchart LR
     C2["Claude project adapter<br/>connect-only"] --> B
     B --> U1["one managed unity mcp<br/>canonical project A"]
     B --> U2["one managed unity mcp<br/>canonical project B"]
-    U1 --> E1["Unity Editor A"]
-    U2 --> E2["Unity Editor B"]
+    U1 -. "A validation turn" .-> E["one licensed Unity Editor seat"]
+    U2 -. "B validation turn" .-> E
 ```
 
 핵심 불변식은 다음과 같다.
 
 - broker는 `launchd`만 시작한다. 설치된 adapter는 모두 `--broker-mode connect-only`라서 두 번째 broker를 자동 생성하지 않는다.
 - 각 프로젝트는 설치 시 `realpath`와 filesystem `dev/inode`로 식별해 immutable prepared config에 고정한다. 설치된 broker/adapter/admin은 시작할 때 외장 프로젝트 경로를 직접 조회하지 않는다. 같은 physical checkout의 alias는 하나로 합치고, 같은 checkout에 서로 다른 `unityBin/extraArgs` profile이 들어오면 시작을 거부한다.
-- 같은 프로젝트의 호출은 직렬화한다. 서로 다른 프로젝트의 가벼운 조회는 병렬 가능하지만, 기본값에서 heavy 작업과 source refresh는 machine-wide로 하나씩만 허용한다.
+- 서로 다른 repository의 source 편집은 병행할 수 있지만 같은 repository의 동시 writer는 agent/Git coordination으로 금지한다. Unity import/recompile/test/build validation turn과 heavy 작업은 기본값에서 machine-wide로 하나씩만 허용한다.
 - mutation은 Unity에 전달된 뒤 timeout, 연결 단절 또는 취소가 발생해도 자동 재전송하지 않는다. 결과를 알 수 없으면 `UNKNOWN_OUTCOME`로 journal에 남기고 해당 프로젝트의 mutation을 차단한다.
 - Codex/Claude 연결 종료는 다른 client나 shared Unity child를 종료하지 않는다.
 - raw `unity mcp`, legacy adapter, 두 번째 broker, 동일 프로젝트의 중복 Editor, license capacity 초과 Editor는 process audit에서 검출하며 기본 설정은 dispatch를 차단한다.
@@ -39,7 +39,7 @@ flowchart LR
    ```
 
 3. LaunchAgent가 사용하는 exact managed Node (`~/.unity-mcp-router/runtimes/<sha256>/node`)에 macOS의 이동식 볼륨 접근을 허용해야 한다. Node SHA가 바뀌면 실행 경로도 바뀌므로 새 경로를 다시 승인하고 `unity-mcp-router-admin doctor`를 통과시킨다. broker는 Unity child를 만들기 전에 별도 process에서 각 project의 `Assets`와 `ProjectSettings`, 설치 시 고정한 exact `dev/inode`를 최대 3초만 검사한다. 권한 팝업이나 볼륨 정지는 `PROJECT_ACCESS_PROBE_TIMEOUT`, 같은 경로의 교체·오마운트는 `PROJECT_IDENTITY_MISMATCH`로 fail-closed하며 broker 자체와 status/doctor는 계속 응답한다.
-4. 각 프로젝트에 호환되는 `com.unity.pipeline`이 설치되어 있고 Editor가 해당 절대 경로로 열려 있어야 한다. 여러 Editor가 열릴 때 Unity CLI는 `--project-path`를 사용한다. `--instance`는 제거됐다. [Unity CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-reference), [Unity Pipeline package](https://docs.unity.com/en-us/unity-production-pipeline/local-tools-cli/unity-pipeline-package)
+4. 각 프로젝트에는 고정된 `com.unity.pipeline` 및 lock stanza와 호환되는 audited embedded compatibility snapshot이 설치되어 있어야 한다. `manual-close`는 Pipeline `editor_status` fallback을 지원하므로 5개 snapshot의 동일 버전 동기화가 선행조건은 아니다. 동일한 승인 handoff package로의 동기화는 `typed-auto-close`의 별도 gate다. single-seat handoff는 선택된 한 Editor만 해당 canonical 절대 경로로 열고 Unity CLI `--project-path` routing을 사용한다. `--instance`는 제거됐다. [Unity CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-reference), [Unity Pipeline package](https://docs.unity.com/en-us/unity-production-pipeline/local-tools-cli/unity-pipeline-package)
 5. 기본 license 설정은 반드시 아래처럼 유지한다.
 
    ```json
@@ -49,7 +49,12 @@ flowchart LR
    }
    ```
 
-   Unity의 기본 약관은 seat당 동시에 Editor 한 인스턴스다. 구매한 floating entitlement와 실제 가용 seat를 확인한 경우에만 `"mode": "floating"`, `"maxConcurrentEditors": 2`처럼 명시적으로 올린다. 단순히 audit를 통과하려고 숫자만 높이면 안 된다. [Unity Editor Software Terms](https://unity.com/legal/editor-terms-of-service/software), [Unity Licensing Server](https://docs.unity.com/licensing/en-us/manual)
+   Unity의 기본 약관은 seat당 동시에 Editor 한 인스턴스다. 구매한 floating entitlement와 실제 가용 seat를 확인한 경우에만 `"mode": "floating"`, `"maxConcurrentEditors": 2`처럼 명시적으로 올린다. 이때 single-seat 전용 handoff를 그대로 둘 수 없으므로 같은 candidate config에서 `"editorHandoff": { "mode": "disabled" }`로 함께 전환한다. 단순히 audit를 통과하려고 숫자만 높이면 안 된다. [Unity Editor Software Terms](https://unity.com/legal/editor-terms-of-service/software), [Unity Licensing Server](https://docs.unity.com/licensing/en-us/manual)
+
+   single-seat의 1차 handoff는 `"editorHandoff": { "mode": "manual-close" }`다. 다른
+   Editor를 자동 종료하지 않고 `WAITING_MANUAL_CLOSE`에서 사용자의 정상 Close를 기다린다.
+   `typed-auto-close`는 다섯 embedded compatibility package 동기화, disposable negative test와
+   A -> B -> A live canary를 모두 통과한 별도 rollout에서만 승인한다.
 
 ## 프로젝트 설정
 
@@ -196,7 +201,9 @@ ROUTER_ADMIN="$ROUTER_HOME/bin/unity-mcp-router-admin"
 "$NODE_BIN" "$ROUTER_CLI" --config "$ROUTER_CONFIG" --broker-mode connect-only --project OhMyFarm call editor_status '{}'
 ```
 
-agent가 Unity source, asset 또는 package를 바꾸는 동안에는 machine-wide source-refresh guard를 소유해야 한다. guard process가 heartbeat를 유지하고 command 종료 뒤 lease를 반납한다.
+서로 다른 repository의 source 편집 자체는 병행할 수 있다. Unity가 그 결과를 import하고
+recompile/test/build하는 구간에는 machine-wide validation turn을 소유해야 한다. guard process가
+Editor handoff를 기다리고 heartbeat를 유지하며 validation command 종료 뒤 lease를 반납한다.
 
 ```sh
 "$NODE_BIN" "$ROUTER_CLI" \
@@ -207,7 +214,25 @@ agent가 Unity source, asset 또는 package를 바꾸는 동안에는 machine-wi
 `PROJECT_ALIAS`, `COMMAND`, `ARGUMENTS`는 실제 대상과 실행 명령으로 바꾼다. 저장소에 없는
 예시 wrapper 이름을 그대로 실행하지 않는다.
 
-MCP 안에서 작업하는 Codex/Claude는 같은 session에서 `unity_router_workspace_begin` → 주기적 `unity_router_workspace_heartbeat` → Editor import/compile 종료 확인 → `unity_router_workspace_end` 순서를 지킨다. `workspace_begin`은 대기 전과 lease grant 직후 강제 process audit를 실행하고, heartbeat도 매번 다시 감사한다. 따라서 대기 또는 작업 중 duplicate broker, raw `unity mcp`, legacy adapter나 license/editor 위반이 생기면 source-refresh 권한 발급·연장을 거부한다. 같은 adapter session이 broker socket만 재연결하면 durable upsert 중이던 lease도 새 connection에 다시 연결된다. adapter disconnect만으로 lease가 해제되지 않으며 broker restart 뒤에도 durable fence가 복구된다.
+MCP 안에서 작업하는 Codex/Claude는 같은 session에서 `unity_router_workspace_begin`의 `token`을
+먼저 보존한다. non-null `editorUse.operationId`를 `unity_router_editor_use_status`로 폴링하면서
+주기적으로 `unity_router_workspace_heartbeat`를 보내고, `COMPLETED`일 때만 Unity 검증한 뒤
+`unity_router_workspace_end`로 반납한다. operation ID가 없거나 handoff가 `COMPLETED`가 아닌
+terminal이면 검증하지 말고 원래 token으로 즉시 end한다. end가
+`WORKSPACE_EDITOR_HANDOFF_ACTIVE`이면 lease를 heartbeat하면서 응답에 포함된 handoff가 terminal이
+될 때까지 기다린 후 end를 재시도한다. release 실패나 owner session 유실은 status/recovery/admin
+절차로 reconcile하며 TTL 만료에 맡기지 않는다. 기본 `manual-close`에서 다른 Editor가 열려 있으면
+`WAITING_MANUAL_CLOSE`이며 사용자가 정상 Close한 뒤 router가 target exact path를 `unity open`으로
+한 번 실행한다. background safe read는 inactive project를 자동으로 깨우지 않고
+`PROJECT_EDITOR_INACTIVE`로 끝난다.
+
+`workspace_begin`은 대기 전과 lease grant 직후 강제 process audit를 실행하고 heartbeat도 매번
+다시 감사한다. 대기 또는 작업 중 duplicate broker, raw `unity mcp`, legacy adapter나
+license/editor 위반이 생기면 validation turn 발급·연장을 거부한다. 같은 adapter session이
+broker socket만 재연결하면 durable upsert 중이던 lease도 새 connection에 다시 연결된다.
+adapter disconnect만으로 lease가 해제되지 않으며 broker restart 뒤에도 durable fence가
+복구된다. 전체 상태, blocker와 canary 조건은
+[single-seat handoff 문서](docs/SINGLE-SEAT-HANDOFF.md)를 따른다.
 
 ## 안전 상태와 재시도 규칙
 
@@ -260,7 +285,8 @@ Pipeline의 다음 비동기 작업은 trigger response로 끝났다고 보지 �
 ## 관리자 control plane
 
 일반 Codex/Claude adapter에는 restart, drain/resume, 강제 resolution 권한이 없다. stable admin
-CLI는 `status`, `doctor`, `drain`, `resume`과 제한된 operation reconciliation만 노출한다.
+CLI는 `status`, `doctor`, `drain`, `resume`, 추적 가능한 standalone Editor switch와 제한된
+operation reconciliation만 노출한다.
 project-child restart는 stable wrapper에서도 의도적으로 거부하며, source-tree live-soak의
 명시적 `--with-restart` gate에서만 실행한다.
 
@@ -270,7 +296,13 @@ project-child restart는 stable wrapper에서도 의도적으로 거부하며, s
 /Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin status --timeout-sec 10
 /Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin drain --timeout-sec 60
 /Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin resume --timeout-sec 10
+/Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin editor use SlashNClaim
+/Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin editor status EDITOR_USE_UUID
 ```
+
+`editor use`는 validation turn을 예약하지 않는 운영자 편의 명령이다. 첫 응답의
+`result.operationId`를 `editor status`로 terminal까지 조회한다. test/build 상호 배제가
+필요하면 반드시 `workspace_begin` 또는 `workspace guard`를 사용한다.
 
 operation reconciliation은 stable admin wrapper의 고정된 config, pinned Node, deployment audit와 admin token을 그대로 사용한다. 이 wrapper는 canonical UUID에 대한 조회와 `confirmed_completed` resolution만 허용하며, raw tool call이나 config/runtime path override를 전달하지 않는다.
 
@@ -298,6 +330,7 @@ stdio stdout은 UTF-8 newline-delimited JSON-RPC frame 전용이고 진단 log�
 ## 다음 문서
 
 - [VALIDATION-2026-08-03.md](docs/VALIDATION-2026-08-03.md): 현재 Mac의 실제 통과 결과와 남은 차단 조건
+- [SINGLE-SEAT-HANDOFF.md](docs/SINGLE-SEAT-HANDOFF.md): Unity Personal 한 자리의 Codex/Claude validation turn, Editor 전환, canary와 장애 처리
 - [OPERATIONS.md](docs/OPERATIONS.md): phase별 rollout goal, 5-project canary, 60-minute soak, incident/rollback 절차
 - [Unity CLI 사용·업데이트](https://docs.unity.com/en-us/unity-cli/use-unity-cli)
 - [Pipeline connectivity](https://docs.unity3d.com/Packages/com.unity.pipeline@0.4/manual/connectivity.html)

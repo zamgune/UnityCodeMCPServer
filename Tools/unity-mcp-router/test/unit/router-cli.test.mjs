@@ -262,6 +262,103 @@ test('workspace guard acquires and releases in one session while forwarding comm
   assert.match(io.stdout(), /lease released/);
 });
 
+test('workspace guard waits through manual Editor handoff before spawning the guarded command', async () => {
+  const calls = [];
+  let statusPoll = 0;
+  const session = new StubSession((_method, params, _options, sequence) => {
+    calls.push(params.name);
+    if (params.name === 'unity_router_workspace_begin') {
+      return toolResponse(sequence, {
+        structuredContent: {
+          token: 'lease-editor-use',
+          project: 'B',
+          editorUse: { operationId: 'handoff-1', state: 'QUEUED', blockers: [] },
+        },
+      });
+    }
+    if (params.name === 'unity_router_editor_use_status') {
+      statusPoll += 1;
+      return toolResponse(sequence, {
+        structuredContent: {
+          operationId: 'handoff-1',
+          state: statusPoll === 1 ? 'WAITING_MANUAL_CLOSE' : 'COMPLETED',
+          blockers: [],
+        },
+      });
+    }
+    return toolResponse(sequence);
+  });
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => true;
+  const spawned = [];
+  const io = captureIo();
+  const result = executeCommand(
+    parseCliArgs(['workspace', 'guard', 'B', '--', '/usr/bin/true']),
+    session,
+    {
+      io: io.io,
+      signalEmitter: new EventEmitter(),
+      editorUsePollIntervalMs: 1,
+      spawnCommand(command) {
+        spawned.push(command);
+        setImmediate(() => {
+          child.exitCode = 0;
+          child.emit('exit', 0, null);
+        });
+        return child;
+      },
+    },
+  );
+
+  assert.equal(await result, 0);
+  assert.deepEqual(calls, [
+    'unity_router_workspace_begin',
+    'unity_router_editor_use_status',
+    'unity_router_editor_use_status',
+    'unity_router_workspace_end',
+  ]);
+  assert.deepEqual(spawned, ['/usr/bin/true']);
+  assert.match(io.stdout(), /Close the currently active Unity Editor normally/);
+});
+
+test('workspace guard releases its turn and never spawns when Editor handoff is blocked', async () => {
+  const calls = [];
+  const session = new StubSession((_method, params, _options, sequence) => {
+    calls.push(params.name);
+    if (params.name === 'unity_router_workspace_begin') {
+      return toolResponse(sequence, {
+        structuredContent: {
+          token: 'lease-blocked-handoff',
+          project: 'B',
+          editorUse: {
+            operationId: null,
+            state: 'BLOCKED',
+            blockers: ['UNKNOWN_OUTCOME_FENCE'],
+          },
+        },
+      });
+    }
+    return toolResponse(sequence);
+  });
+  let spawned = false;
+  const io = captureIo();
+  const code = await executeCommand(
+    parseCliArgs(['workspace', 'guard', 'B', '--', '/usr/bin/true']),
+    session,
+    {
+      io: io.io,
+      signalEmitter: new EventEmitter(),
+      spawnCommand() { spawned = true; throw new Error('must not spawn'); },
+    },
+  );
+  assert.equal(code, 1);
+  assert.equal(spawned, false);
+  assert.deepEqual(calls, ['unity_router_workspace_begin', 'unity_router_workspace_end']);
+  assert.match(io.stderr(), /UNKNOWN_OUTCOME_FENCE/);
+});
+
 test('workspace guard heartbeats and reports a recoverable token when release fails', async () => {
   let heartbeatCount = 0;
   const session = new StubSession((_method, params, _options, sequence) => {

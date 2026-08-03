@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { AuthManager } from './auth-manager.mjs';
@@ -12,6 +13,7 @@ import {
 } from './async-operation-policy.mjs';
 import { BUILD_INFO } from './build-info.mjs';
 import { classifyFailure } from './failure-classifier.mjs';
+import { EditorLifecycle, EDITOR_HANDOFF_STATES } from './editor-lifecycle.mjs';
 import { LeaseManager } from './lease-manager.mjs';
 import { NULL_LOGGER } from './logger.mjs';
 import { auditSystemProcesses } from './macos-process-audit.mjs';
@@ -58,6 +60,21 @@ function withOperationMetadata(result, operationId, state, extra = {}) {
 
 function requestKey(clientId, requestId) {
   return `${clientId}:${typeof requestId}:${String(requestId)}`;
+}
+
+function execFileBounded(file, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdoutBytes = Buffer.byteLength(String(stdout ?? ''));
+        error.stderrBytes = Buffer.byteLength(String(stderr ?? ''));
+        reject(error);
+      } else resolve({
+        stdoutBytes: Buffer.byteLength(String(stdout ?? '')),
+        stderrBytes: Buffer.byteLength(String(stderr ?? '')),
+      });
+    });
+  });
 }
 
 function validInitializeParams(params) {
@@ -129,6 +146,26 @@ export const BROKER_TOOLS = Object.freeze([
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
+    name: 'unity_router_editor_use',
+    description: 'Queue a tracked single-seat Editor handoff to one configured project. This operator convenience does not reserve a validation turn.',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string' } },
+      required: ['project'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'unity_router_editor_use_status',
+    description: 'Inspect one tracked Editor handoff without replaying close or open side effects.',
+    inputSchema: {
+      type: 'object',
+      properties: { operationId: { type: 'string' } },
+      required: ['operationId'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'unity_router_restart',
     description: 'Restart one project adapter only when its queue has no active operation.',
     inputSchema: {
@@ -158,7 +195,7 @@ export const BROKER_TOOLS = Object.freeze([
   },
   {
     name: 'unity_router_workspace_begin',
-    description: 'Acquire the machine-wide source-refresh lease before an agent edits Unity source or assets.',
+    description: 'Acquire the machine-wide Unity validation turn and queue the matching single-seat Editor handoff.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -180,7 +217,7 @@ export const BROKER_TOOLS = Object.freeze([
   },
   {
     name: 'unity_router_workspace_end',
-    description: 'Release a workspace lease after the matching Editor is ready and compilation has stopped.',
+    description: 'Release a Unity validation turn after tracked import, tests, builds, and handoff work are terminal.',
     inputSchema: {
       type: 'object',
       properties: { leaseToken: { type: 'string' } },
@@ -228,11 +265,20 @@ export const BROKER_TOOLS = Object.freeze([
 ]);
 
 const ADMIN_TOOL_NAMES = new Set([
+  'unity_router_editor_use',
   'unity_router_restart',
   'unity_router_drain',
   'unity_router_resume',
   'unity_router_workspace_resolve',
   'unity_router_operation_resolve',
+]);
+
+const EDITOR_HANDOFF_TERMINAL_STATES = new Set([
+  EDITOR_HANDOFF_STATES.COMPLETED,
+  EDITOR_HANDOFF_STATES.BLOCKED,
+  EDITOR_HANDOFF_STATES.CANCELLED,
+  EDITOR_HANDOFF_STATES.FAILED,
+  EDITOR_HANDOFF_STATES.UNKNOWN_OUTCOME,
 ]);
 
 export class BrokerCore {
@@ -246,6 +292,7 @@ export class BrokerCore {
     configHash = null,
     processAuditor = auditSystemProcesses,
     projectAccessAuditor = null,
+    editorLifecycle = null,
     toolRefreshIntervalMs = 5_000,
     toolCatalogRecoveryGraceMs = TOOL_CATALOG_RECOVERY_GRACE_MS,
     toolCatalogRecoveryPollMs = TOOL_CATALOG_RECOVERY_POLL_MS,
@@ -283,6 +330,7 @@ export class BrokerCore {
     this.toolReannounceEpochs = new Map();
     this.toolRecoveryAnnounceEpochs = new Map();
     this.toolDiscoveryInFlight = new Map();
+    this.editorHandoffAnnouncements = new Set();
     this.toolRefreshTimer = null;
     this.toolCatalogRecoveryGraceMs = Math.max(0, toolCatalogRecoveryGraceMs);
     this.toolCatalogRecoveryPollMs = Math.max(1, toolCatalogRecoveryPollMs);
@@ -307,6 +355,22 @@ export class BrokerCore {
       env,
       logger: this.logger,
     });
+    this.editorLifecycle = editorLifecycle ?? new EditorLifecycle({
+      config,
+      journal,
+      processAudit: () => this.#processAudit({ force: true }),
+      projectAccess: (project, options = {}) => this.projectAccessAuditor.assertAccessible(project, {
+        force: true,
+        ...options,
+      }),
+      callTool: (project, name, args, timeoutMs) =>
+        this.#callEditorLifecycleTool(project, name, args, timeoutMs),
+      stopChild: (project) => this.children.get(project.key)?.stop('editor-handoff') ?? Promise.resolve(),
+      openProject: (project) => this.#openEditorProject(project),
+      brokerIdle: (project) => this.#editorSwitchBlockers(project),
+      onStateChange: (snapshot) => this.#onEditorLifecycleState(snapshot),
+      logger: this.logger,
+    });
     this.shuttingDown = false;
     this.draining = false;
     this.idleTimer = null;
@@ -318,6 +382,9 @@ export class BrokerCore {
       else this.#addRecoveryFault(operation, 'UNKNOWN_PROJECT_NOT_CONFIGURED');
     }
     for (const operation of this.journal.list({ state: OPERATION_STATES.RUNNING })) {
+      if (operation.method === 'unity_router_editor_use' || operation.method === 'unity_router_editor_open') {
+        continue;
+      }
       this.#restoreAsyncTracker(operation);
     }
     if (this.config.broker.childIdleMin > 0) {
@@ -361,6 +428,8 @@ export class BrokerCore {
       usedProjectKeys: new Set([project.key]),
       workspaceLeases: new Map(),
       pendingLeaseRequests: new Map(),
+      incomingRequests: new Set(),
+      earlyCancellations: new Map(),
       closed: false,
       ready: false,
     };
@@ -474,10 +543,22 @@ export class BrokerCore {
         toolTimeoutMs: this.config.toolTimeoutSec * 1000,
         env: this.env,
         logger: this.logger,
-        beforeSpawn: ({ deadlineAt }) => this.projectAccessAuditor.assertAccessible(project, {
-          force: true,
-          deadlineAt,
-        }),
+        beforeSpawn: async ({ deadlineAt }) => {
+          await this.projectAccessAuditor.assertAccessible(project, {
+            force: true,
+            deadlineAt,
+          });
+          const inactive = await this.#singleSeatInactiveProject(project, { force: true });
+          if (inactive) {
+            throw new SchedulerError(
+              inactive.content?.[0]?.text ?? 'The exact single-seat Unity Editor is not active.',
+              {
+                code: inactive.structuredContent?.code ?? 'PROJECT_EDITOR_INACTIVE',
+                details: inactive.structuredContent,
+              },
+            );
+          }
+        },
         onNotification: (message, context) => this.#onChildNotification(project, message, context),
         onLifecycle: (event) => this.#onChildLifecycle(project, event),
       });
@@ -554,6 +635,9 @@ export class BrokerCore {
       return;
     }
 
+    const incomingRequestKey = requestKey(connection.id, id);
+    connection.incomingRequests.add(incomingRequestKey);
+
     try {
       if (method === 'initialize') {
         if (connection.initialized) {
@@ -589,6 +673,16 @@ export class BrokerCore {
       if (method === 'ping') {
         connection.send(responseResult(id, {}));
         return;
+      }
+      // Recovery is observe-only for any handoff that may already have
+      // dispatched close/open. Do not let discovery or tool calls race ahead
+      // of the durable journal reconstruction performed by EditorLifecycle.
+      await this.editorLifecycle.ready?.();
+      if (connection.closed || this.connections.get(connection.id) !== connection) return;
+      if (connection.earlyCancellations.has(incomingRequestKey)) {
+        throw new SchedulerError(`Request ${String(id)} cancelled before broker dispatch`, {
+          code: 'CANCELLED',
+        });
       }
       if (method === 'tools/list') {
         const project = this.projectByAlias(connection.defaultProject);
@@ -637,10 +731,15 @@ export class BrokerCore {
       const code = error?.code === 'CANCELLED'
         ? -32800
         : error instanceof SchedulerError ? -32080 : -32000;
-      connection.send(responseError(id, code, error.message, error.code ? {
-        brokerCode: error.code,
-        ...(error.details === undefined ? {} : { details: error.details }),
-      } : undefined));
+      if (!connection.closed && this.connections.get(connection.id) === connection) {
+        connection.send(responseError(id, code, error.message, error.code ? {
+          brokerCode: error.code,
+          ...(error.details === undefined ? {} : { details: error.details }),
+        } : undefined));
+      }
+    } finally {
+      connection.incomingRequests.delete(incomingRequestKey);
+      connection.earlyCancellations.delete(incomingRequestKey);
     }
   }
 
@@ -676,6 +775,29 @@ export class BrokerCore {
     if (typeof toolName !== 'string' || !toolName) return textResult('Tool name is required.', true);
     const args = { ...(params.arguments ?? {}) };
     if (isNativeTool(toolName)) return this.#callNativeTool(connection, clientRequestId, toolName, args);
+    const editorTransition = this.editorLifecycle.activeStatus?.();
+    if (editorTransition) {
+      return textResult(
+        `Unity Editor is switching to "${editorTransition.target.project}". ` +
+          `Poll unity_router_editor_use_status with ${editorTransition.operationId}.`,
+        true,
+        { code: 'EDITOR_TRANSITIONING', editorUse: editorTransition },
+      );
+    }
+    const lifecycleUnknown = this.journal.list({ state: OPERATION_STATES.UNKNOWN_OUTCOME })
+      .filter((operation) => operation.method === 'unity_router_editor_use' ||
+        operation.method === 'unity_router_editor_open');
+    if (lifecycleUnknown.length > 0) {
+      return textResult(
+        'Unity Editor routing is globally fenced by an unresolved handoff outcome. ' +
+          'Inspect the exact Editor process and resolve every listed operation before retrying.',
+        true,
+        {
+          code: 'EDITOR_HANDOFF_UNKNOWN_OUTCOME',
+          operationIds: lifecycleUnknown.map((operation) => operation.operationId),
+        },
+      );
+    }
     if (this.draining) {
       return textResult('Broker is drained for maintenance; no new Unity work is accepted.', true, {
         code: 'BROKER_DRAINING',
@@ -689,6 +811,20 @@ export class BrokerCore {
       return textResult(`Unknown project "${requestedAlias}". Configured: ${Object.keys(this.config.aliases).join(', ')}`, true);
     }
     connection.usedProjectKeys.add(project.key);
+
+    const inactiveEditor = await this.#singleSeatInactiveProject(project);
+    if (inactiveEditor) return inactiveEditor;
+    if (connection.closed || this.connections.get(connection.id) !== connection) {
+      throw new SchedulerError(`Request ${String(clientRequestId)} connection closed before Unity preflight`, {
+        code: 'CANCELLED',
+      });
+    }
+    const incomingRequestKey = requestKey(connection.id, clientRequestId);
+    if (connection.earlyCancellations.has(incomingRequestKey)) {
+      throw new SchedulerError(`Request ${String(clientRequestId)} cancelled before Unity preflight`, {
+        code: 'CANCELLED',
+      });
+    }
 
     const classification = this.recovery.classify(toolName);
     const operationId = randomUUID();
@@ -898,6 +1034,22 @@ export class BrokerCore {
       if (classification.heavy && !sharesTrackedAsyncLeases) acquireImmediate('heavy');
       if (classification.exclusive && !sharesTrackedAsyncLeases) acquireImmediate('exclusive-editor');
 
+      const inactiveBeforeChild = await this.#singleSeatInactiveProject(project, { force: true });
+      if (inactiveBeforeChild) {
+        if (classification.mutation) {
+          await this.journal.markCancelled(operation.operationId);
+          operation.state = 'CANCELLED';
+          return withOperationMetadata(
+            inactiveBeforeChild,
+            operation.operationId,
+            'CANCELLED',
+            { dispatchBlocked: true },
+          );
+        }
+        operation.state = 'CANCELLED';
+        return inactiveBeforeChild;
+      }
+
       child = this.childFor(project);
       await this.#startChildForOperation(child, connection, operation, schedulerContext.deadlineAt);
       if (operation.cancelRequested) {
@@ -911,6 +1063,10 @@ export class BrokerCore {
       if (classification.mutation) {
         const dispatchViolation = await this.#dispatchSafetyViolation(project, operation);
         if (dispatchViolation) {
+          if (['PROJECT_EDITOR_INACTIVE', 'EDITOR_PROCESS_AUDIT_UNSAFE',
+            'EDITOR_PROCESS_AUDIT_UNAVAILABLE'].includes(dispatchViolation.structuredContent?.code)) {
+            await child.stop('editor-inactive-before-dispatch').catch(() => {});
+          }
           await this.journal.markCancelled(operation.operationId);
           operation.state = 'CANCELLED';
           return withOperationMetadata(
@@ -934,7 +1090,49 @@ export class BrokerCore {
       operation.state = 'DISPATCHING';
       let retriesUsed = 0;
       for (;;) {
+        if (retriesUsed > 0) {
+          const inactiveBeforeRetry = await this.#singleSeatInactiveProject(project, { force: true });
+          if (inactiveBeforeRetry) {
+            if (classification.mutation) await this.journal.markCancelled(operation.operationId);
+            operation.state = 'CANCELLED';
+            return classification.mutation
+              ? withOperationMetadata(
+                  inactiveBeforeRetry,
+                  operation.operationId,
+                  'CANCELLED',
+                  { dispatchBlocked: true, retryBlocked: true },
+                )
+              : inactiveBeforeRetry;
+          }
+        }
         await this.#startChildForOperation(child, connection, operation, schedulerContext.deadlineAt);
+        const attemptViolation = classification.mutation
+          ? await this.#dispatchSafetyViolation(project, operation)
+          : await this.#singleSeatInactiveProject(project, { force: true });
+        if (attemptViolation) {
+          if (['PROJECT_EDITOR_INACTIVE', 'EDITOR_PROCESS_AUDIT_UNSAFE',
+            'EDITOR_PROCESS_AUDIT_UNAVAILABLE'].includes(attemptViolation.structuredContent?.code)) {
+            await child.stop('editor-inactive-before-attempt').catch(() => {});
+          }
+          if (classification.mutation) await this.journal.markCancelled(operation.operationId);
+          operation.state = 'CANCELLED';
+          return classification.mutation
+            ? withOperationMetadata(
+                attemptViolation,
+                operation.operationId,
+                'CANCELLED',
+                { dispatchBlocked: true, retriesUsed },
+              )
+            : attemptViolation;
+        }
+        if (operation.cancelRequested) {
+          if (classification.mutation) await this.journal.markCancelled(operation.operationId);
+          operation.state = 'CANCELLED';
+          return textResult(`Operation ${operation.operationId} cancelled before dispatch.`, true, {
+            operationId: operation.operationId,
+            state: 'CANCELLED',
+          });
+        }
         const timeoutMs = Math.min(this.config.toolTimeoutSec * 1000, Math.max(1, remainingMs()));
         if (operation.toolName === 'recompile' && operation.recompileListChangedEpochAtDispatch == null) {
           operation.recompileListChangedEpochAtDispatch = this.#childToolListChangedEpoch(project.key);
@@ -953,6 +1151,11 @@ export class BrokerCore {
           operationId: operation.operationId,
           protocolVersion: connection.protocolVersion,
           clientInfo: connection.clientInfo,
+          // The broker has just started and audited this exact child/Editor
+          // pairing. Never let request() silently replace the child after
+          // that audit; a pre-dispatch loss must return undispatched so the
+          // retry path can repeat both startup and the safety audit.
+          requireAlreadyStarted: true,
           deadlineAt: schedulerContext.deadlineAt,
           startupTimeoutMs: Math.min(this.config.startupTimeoutSec * 1000, Math.max(1, remainingMs())),
           isCancelled: () => operation.cancelRequested,
@@ -1181,6 +1384,7 @@ export class BrokerCore {
       });
       return [];
     }
+    if (await this.#singleSeatInactiveProject(project)) return [];
     const cli = await this.auth.compatibility(this.config.minimumCliVersion);
     if (waiter?.cancelRequested) {
       throw new SchedulerError('Tool discovery cancelled during compatibility checks', { code: 'CANCELLED' });
@@ -1489,7 +1693,9 @@ export class BrokerCore {
   }
 
   async #refreshUnavailableTools() {
-    if (this.shuttingDown || this.draining) return;
+    if (this.shuttingDown || this.draining || this.editorLifecycle.activeStatus?.()) return;
+    await this.editorLifecycle.ready?.();
+    if (this.editorLifecycle.activeStatus?.()) return;
     const work = [];
     for (const project of this.config.projects) {
       if (this.toolRegistry.get(project.key)?.tools.length) continue;
@@ -1611,6 +1817,33 @@ export class BrokerCore {
       const snapshot = await this.snapshot({ auth, isAdmin: connection.isAdmin });
       return textResult(JSON.stringify(snapshot, null, 2), false, snapshot);
     }
+    if (name === 'unity_router_editor_use') {
+      const project = this.projectByAlias(args.project);
+      if (!project) {
+        return textResult(
+          `Unknown project "${args.project}". Configured: ${Object.keys(this.config.aliases).join(', ')}`,
+          true,
+          { code: 'EDITOR_PROJECT_NOT_CONFIGURED' },
+        );
+      }
+      try {
+        const editorUse = await this.editorLifecycle.ensureProject(project);
+        return textResult(JSON.stringify(editorUse, null, 2), false, editorUse);
+      } catch (error) {
+        return textResult(error.message, true, {
+          code: error.code ?? 'EDITOR_HANDOFF_FAILED',
+          ...(error.details === undefined ? {} : { details: error.details }),
+        });
+      }
+    }
+    if (name === 'unity_router_editor_use_status') {
+      const editorUse = this.editorLifecycle.status(args.operationId);
+      return editorUse
+        ? textResult(JSON.stringify(editorUse, null, 2), false, editorUse)
+        : textResult(`Unknown Editor handoff "${args.operationId}".`, true, {
+            code: 'EDITOR_HANDOFF_NOT_FOUND',
+          });
+    }
     if (name === 'unity_router_doctor') {
       const [processAudit, projectAccess] = await Promise.all([
         this.#processAudit({ force: true }),
@@ -1645,14 +1878,16 @@ export class BrokerCore {
       this.draining = true;
       const deadline = Date.now() + (args.timeoutSec ?? 60) * 1000;
       while (
-        (this.budget.snapshot().pendingTotal > 0 || this.#allDeliveryPending().length > 0) &&
+        (this.budget.snapshot().pendingTotal > 0 || this.#allDeliveryPending().length > 0 ||
+          this.editorLifecycle.activeStatus?.() != null) &&
         Date.now() < deadline
       ) await delay(25);
       const pendingTotal = this.budget.snapshot().pendingTotal;
       const deliveryPending = this.#allDeliveryPending().map((operation) => operation.operationId);
       const leases = this.#publicLeases();
-      const drained = pendingTotal === 0 && deliveryPending.length === 0 && leases.length === 0;
-      const result = { drained, pendingTotal, deliveryPending, leases, mutationFences: Object.fromEntries(
+      const editorUse = this.editorLifecycle.activeStatus?.() ?? null;
+      const drained = pendingTotal === 0 && deliveryPending.length === 0 && leases.length === 0 && editorUse == null;
+      const result = { drained, pendingTotal, deliveryPending, leases, editorUse, mutationFences: Object.fromEntries(
         [...this.unknownByProject].map(([key, values]) => [key, [...values]]),
       ) };
       return textResult(JSON.stringify(result, null, 2), !drained, result);
@@ -1715,6 +1950,21 @@ export class BrokerCore {
           );
         }
       }
+      let editorOpenResolution = null;
+      if (operation.method === 'unity_router_editor_use' && args.resolution === 'confirmed_completed') {
+        const childOperationId = `${args.operationId}:open`;
+        const childOperation = this.journal.get(childOperationId);
+        const isExactOpenChild = childOperation?.method === 'unity_router_editor_open'
+          && childOperation.projectKey === operation.projectKey
+          && [OPERATION_STATES.RUNNING, OPERATION_STATES.UNKNOWN_OUTCOME].includes(childOperation.state);
+        if (isExactOpenChild) {
+          // Resolve the internal open record first. If durable append fails,
+          // the canonical parent UUID remains unresolved and the supported
+          // admin command can be retried without stranding an unaddressable
+          // `${parent}:open` fence.
+          editorOpenResolution = await this.journal.markResolved(childOperationId, args.resolution);
+        }
+      }
       const resolved = await this.journal.markResolved(args.operationId, args.resolution);
       for (const tracker of this.asyncByProject.values()) {
         if (tracker.operationId === args.operationId) this.#releaseAsyncResources(tracker);
@@ -1723,9 +1973,20 @@ export class BrokerCore {
         operationIds.delete(args.operationId);
         if (operationIds.size === 0) this.unknownByProject.delete(projectKey);
       }
+      if (editorOpenResolution) {
+        for (const [projectKey, operationIds] of this.unknownByProject) {
+          operationIds.delete(editorOpenResolution.operationId);
+          if (operationIds.size === 0) this.unknownByProject.delete(projectKey);
+        }
+        this.pendingByOperation.delete(editorOpenResolution.operationId);
+        this.recoveryFaults.delete(editorOpenResolution.operationId);
+      }
       this.pendingByOperation.delete(args.operationId);
       this.recoveryFaults.delete(args.operationId);
-      return textResult(JSON.stringify(resolved, null, 2), false, resolved);
+      const result = editorOpenResolution
+        ? { ...resolved, editorOpenResolution }
+        : resolved;
+      return textResult(JSON.stringify(result, null, 2), false, result);
     }
     if (name === 'unity_router_workspace_begin') {
       if (this.draining) return textResult('Broker is draining; refusing a new workspace lease.', true, { code: 'BROKER_DRAINING' });
@@ -1799,9 +2060,30 @@ export class BrokerCore {
         }
         durabilityError = error;
       }
-      const restored = { ...record, internalLease: lease };
+      const restored = { ...record, internalLease: lease, editorUseOperationId: null };
       this.workspaceRecords.set(record.token, restored);
-      const value = this.#workspaceSnapshot(restored);
+      let editorUse = null;
+      try {
+        if (durabilityError) throw durabilityError;
+        if (this.config.editorHandoff.mode !== 'disabled') {
+          editorUse = await this.editorLifecycle.ensureProject(project);
+          restored.editorUseOperationId = editorUse.operationId;
+        }
+      } catch (error) {
+        editorUse = {
+          operationId: null,
+          target: {
+            project: this.projectName(project),
+            projectKey: project.key,
+            projectPath: project.path,
+          },
+          state: EDITOR_HANDOFF_STATES.BLOCKED,
+          blockers: [error.code ?? 'EDITOR_HANDOFF_FAILED'],
+          message: error.message,
+          mode: this.config.editorHandoff.mode,
+        };
+      }
+      const value = { ...this.#workspaceSnapshot(restored), editorUse };
       // The adapter can reconnect with the same stable client/session while
       // the durable upsert is in flight. Attach the lease to the current
       // connection, not the stale socket-owned object that began the request.
@@ -1864,6 +2146,19 @@ export class BrokerCore {
     }
     if (name === 'unity_router_workspace_end') {
       const record = this.#ownedWorkspaceRecord(args.leaseToken, connection);
+      const editorUse = record.editorUseOperationId
+        ? this.editorLifecycle.status(record.editorUseOperationId)
+        : this.editorLifecycle.activeStatus?.();
+      if (editorUse && !EDITOR_HANDOFF_TERMINAL_STATES.has(editorUse.state)) {
+        return textResult(
+          `Validation turn cannot end while Editor handoff ${editorUse.operationId} is ${editorUse.state}.`,
+          true,
+          {
+            code: 'WORKSPACE_EDITOR_HANDOFF_ACTIVE',
+            editorUse,
+          },
+        );
+      }
       const activeAsync = this.asyncByProject.get(record.projectKey);
       if (activeAsync) {
         return textResult(
@@ -1899,6 +2194,16 @@ export class BrokerCore {
       if (args.confirm !== true) return textResult('Refused: confirm=true is required.', true);
       const record = this.workspaceRecords.get(args.leaseToken);
       if (!record) return textResult(`Unknown workspace lease "${args.leaseToken}".`, true);
+      const editorUse = record.editorUseOperationId
+        ? this.editorLifecycle.status(record.editorUseOperationId)
+        : this.editorLifecycle.activeStatus?.();
+      if (editorUse && !EDITOR_HANDOFF_TERMINAL_STATES.has(editorUse.state)) {
+        return textResult(
+          `Cannot resolve validation turn while Editor handoff ${editorUse.operationId} is ${editorUse.state}.`,
+          true,
+          { code: 'WORKSPACE_EDITOR_HANDOFF_ACTIVE', editorUse },
+        );
+      }
       const activeAsync = this.asyncByProject.get(record.projectKey);
       if (activeAsync) {
         return textResult(
@@ -1929,10 +2234,14 @@ export class BrokerCore {
   }
 
   #cancelClientRequest(connection, params) {
-    const operation = this.pendingByRequest.get(requestKey(connection.id, params?.requestId));
+    const key = requestKey(connection.id, params?.requestId);
+    const operation = this.pendingByRequest.get(key);
     if (!operation) {
-      const handle = connection.pendingLeaseRequests.get(requestKey(connection.id, params?.requestId));
+      const handle = connection.pendingLeaseRequests.get(key);
       try { handle?.cancel(params?.reason); } catch { /* exact handle may already be granted */ }
+      if (!handle && connection.incomingRequests.has(key)) {
+        connection.earlyCancellations.set(key, params?.reason ?? 'client cancelled');
+      }
       return;
     }
     if (operation.kind === 'tools-list') {
@@ -2089,6 +2398,140 @@ export class BrokerCore {
     return invalidation.newlyInvalidated || generation?.operationId === operationId;
   }
 
+  #onEditorLifecycleState(snapshot) {
+    if (snapshot?.state !== EDITOR_HANDOFF_STATES.COMPLETED ||
+        this.editorHandoffAnnouncements.has(snapshot.operationId)) return;
+    this.editorHandoffAnnouncements.add(snapshot.operationId);
+    for (const project of this.config.projects) {
+      this.#invalidateProjectTools(project.key);
+      this.#broadcastToolListChanged(project.key);
+    }
+    this.logger.info('Editor handoff completed and project catalogs were invalidated', {
+      operationId: snapshot.operationId,
+      project: snapshot.target?.project,
+      projectPath: snapshot.target?.projectPath,
+    });
+  }
+
+  async #singleSeatInactiveProject(project, { force = false } = {}) {
+    if (this.config.license.mode !== 'single-seat') return null;
+    const audit = await this.#processAudit({ force });
+    const errorFindings = Array.isArray(audit?.findings)
+      ? audit.findings.filter((finding) => finding?.severity === 'error')
+      : [];
+    if (audit?.ok !== true || errorFindings.length > 0 || !Array.isArray(audit?.editors)) {
+      const unavailable = audit?.findings?.some((finding) => finding.kind === 'process_audit_failed');
+      return textResult(
+        'Unity Editor process identity is not clean, so a project child will not be started.',
+        true,
+        {
+          code: unavailable ? 'EDITOR_PROCESS_AUDIT_UNAVAILABLE' : 'EDITOR_PROCESS_AUDIT_UNSAFE',
+          findings: audit?.findings ?? [],
+        },
+      );
+    }
+    const exact = audit.editors.find((editor) => editor.projectPath === project.path);
+    if (exact && audit.editors.length === 1) return null;
+    const active = audit.editors.length === 1 ? audit.editors[0] : null;
+    return textResult(
+      active
+        ? `The single licensed Unity Editor is active for "${active.projectPath}", not "${project.path}". ` +
+          `Acquire a validation turn or run the admin editor-use command before calling project tools.`
+        : `No Unity Editor is active for "${project.path}". Acquire a validation turn or run the admin ` +
+          `editor-use command before calling project tools.`,
+      true,
+      {
+        code: 'PROJECT_EDITOR_INACTIVE',
+        targetProject: this.projectName(project),
+        targetProjectPath: project.path,
+        activeEditor: active,
+      },
+    );
+  }
+
+  #editorSwitchBlockers(project) {
+    const blockers = [];
+    if (this.draining) blockers.push('BROKER_DRAINING');
+    const budget = this.budget.snapshot();
+    if (budget.pendingTotal > 0) blockers.push('BROKER_QUEUE_NOT_IDLE');
+    if (this.#allDeliveryPending().length > 0) blockers.push('DELIVERY_ACK_PENDING');
+    if (this.asyncByProject.size > 0) blockers.push('BACKGROUND_OPERATION_ACTIVE');
+    if (this.recoveryFaults.size > 0) blockers.push('BROKER_RECOVERY_FENCE');
+    if (this.journal.list({ state: OPERATION_STATES.UNKNOWN_OUTCOME }).length > 0) {
+      blockers.push('UNKNOWN_OUTCOME_FENCE');
+    }
+
+    const workspace = [...this.workspaceRecords.values()];
+    const matchingWorkspace = workspace.length === 1 && workspace[0].projectKey === project.key;
+    const leases = this.leases.list();
+    const allowedWorkspaceLease = matchingWorkspace
+      ? workspace[0].internalLease?.token
+      : null;
+    if (leases.some((lease) => lease.token !== allowedWorkspaceLease)) {
+      blockers.push('GLOBAL_LEASE_ACTIVE');
+    }
+    if (workspace.length > 0 && !matchingWorkspace) blockers.push('OTHER_PROJECT_VALIDATION_TURN');
+    return blockers.length === 0 ? { ok: true } : { ok: false, blockers };
+  }
+
+  async #callEditorLifecycleTool(project, name, args, timeoutMs) {
+    const child = this.childFor(project);
+    const deadlineAt = Date.now() + Math.max(1, timeoutMs);
+    const clientInfo = { name: 'unity-mcp-router-editor-lifecycle', version: SERVER_VERSION };
+    await child.start(PROTOCOL_VERSION, clientInfo, {
+      connectionId: 'editor-lifecycle',
+      clientRequestId: name,
+      protocolVersion: PROTOCOL_VERSION,
+      clientInfo,
+      deadlineAt,
+      startupTimeoutMs: Math.min(this.config.startupTimeoutSec * 1000, timeoutMs),
+    });
+    const response = await child.request('tools/call', { name, arguments: args }, timeoutMs, {
+      connectionId: 'editor-lifecycle',
+      clientRequestId: name,
+      protocolVersion: PROTOCOL_VERSION,
+      clientInfo,
+      requireAlreadyStarted: true,
+      deadlineAt,
+      startupTimeoutMs: Math.min(this.config.startupTimeoutSec * 1000, timeoutMs),
+    });
+    if (response.transportFailure || response.error) {
+      const error = new Error(response.error?.message ?? `Unity lifecycle tool ${name} failed`);
+      error.code = String(response.error?.code ?? 'EDITOR_LIFECYCLE_TRANSPORT_FAILED');
+      error.dispatched = response.dispatched;
+      throw error;
+    }
+    if (response.result?.isError === true) {
+      const error = new Error(`Unity lifecycle tool ${name} returned an error result`);
+      error.code = response.result?.structuredContent?.code ?? 'EDITOR_LIFECYCLE_TOOL_ERROR';
+      throw error;
+    }
+    return response.result;
+  }
+
+  async #openEditorProject(project) {
+    const unityBin = project.unityBin ?? this.config.unityBin;
+    const timeout = Math.min(60_000, this.config.editorHandoff.startupTimeoutSec * 1000);
+    const args = [
+      ...(this.config.unityArgs ?? []),
+      '--non-interactive',
+      '--format',
+      'json',
+      'open',
+      project.path,
+    ];
+    this.logger.info('dispatching exact Unity Editor open', {
+      project: this.projectName(project),
+      projectPath: project.path,
+    });
+    return execFileBounded(unityBin, args, {
+      env: this.env,
+      timeout,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
   async snapshot({ auth, isAdmin = false } = {}) {
     const version = await this.auth.version();
     const compatibility = await this.auth.compatibility(this.config.minimumCliVersion);
@@ -2116,6 +2559,10 @@ export class BrokerCore {
         signedIn: auth?.signedIn ?? null,
       },
       budget: this.budget.snapshot(),
+      editorHandoff: {
+        mode: this.config.editorHandoff.mode,
+        active: this.editorLifecycle.activeStatus?.() ?? null,
+      },
       leases: this.#publicLeases(),
       workspaceLeases: [...this.workspaceRecords.values()].map((record) => {
         const value = this.#workspaceSnapshot(record);
@@ -2162,6 +2609,7 @@ export class BrokerCore {
     this.idleTimer = null;
     if (this.toolRefreshTimer) clearInterval(this.toolRefreshTimer);
     this.toolRefreshTimer = null;
+    await this.editorLifecycle.close();
     for (const tracker of this.asyncByProject.values()) {
       if (tracker.timer) clearTimeout(tracker.timer);
       tracker.timer = null;
@@ -2343,6 +2791,10 @@ export class BrokerCore {
 
   #workspaceSnapshot(record) {
     const internal = this.leases.getLease(record.internalLease);
+    const activeEditorUse = this.editorLifecycle.activeStatus?.();
+    const editorUse = record.editorUseOperationId
+      ? this.editorLifecycle.status(record.editorUseOperationId)
+      : (activeEditorUse?.target?.projectKey === record.projectKey ? activeEditorUse : null);
     return {
       token: record.token,
       project: record.projectName,
@@ -2351,6 +2803,7 @@ export class BrokerCore {
       acquiredAt: record.acquiredAt,
       heartbeatAt: record.heartbeatAt,
       expiresAt: record.expiresAt,
+      editorUse,
     };
   }
 
@@ -2752,10 +3205,16 @@ export class BrokerCore {
     return trackedPromise;
   }
 
-  async #systemSafetyViolation(project, classification, { force = false } = {}) {
-    if (this.config.broker.processAuditEnforcement === 'report-only') return null;
+  async #systemSafetyViolation(project, classification, {
+    force = false,
+    requireExactActiveEditor = false,
+  } = {}) {
+    if (this.config.broker.processAuditEnforcement === 'report-only' && !requireExactActiveEditor) {
+      return null;
+    }
     const audit = await this.#processAudit({ force });
-    const findings = audit.findings.filter((finding) => {
+    const findings = (audit.findings ?? []).filter((finding) => {
+      if (this.config.broker.processAuditEnforcement === 'report-only') return false;
       if (finding.severity !== 'error') return false;
       if (finding.kind === 'process_audit_failed') return true;
       if (
@@ -2771,12 +3230,36 @@ export class BrokerCore {
       if (finding.kind === 'legacy_or_unattached_adapter') return classification.mutation;
       return false;
     });
-    if (findings.length === 0) return null;
-    return textResult(
-      'Unity dispatch is blocked because unmanaged or conflicting local processes would bypass broker safety.',
-      true,
-      { code: 'SYSTEM_CONCURRENCY_UNSAFE', findings },
-    );
+    if (findings.length > 0) {
+      return textResult(
+        'Unity dispatch is blocked because unmanaged or conflicting local processes would bypass broker safety.',
+        true,
+        { code: 'SYSTEM_CONCURRENCY_UNSAFE', findings },
+      );
+    }
+    if (requireExactActiveEditor && this.config.license.mode === 'single-seat') {
+      if (audit?.ok !== true || !Array.isArray(audit.editors)) {
+        return textResult(
+          'Unity Editor process identity is not clean at mutation dispatch.',
+          true,
+          { code: 'EDITOR_PROCESS_AUDIT_UNSAFE', findings: audit?.findings ?? [] },
+        );
+      }
+      const exact = audit.editors.find((editor) => editor.projectPath === project.path);
+      if (!exact || audit.editors.length !== 1) {
+        return textResult(
+          `The exact single-seat Unity Editor for "${project.path}" is no longer active.`,
+          true,
+          {
+            code: 'PROJECT_EDITOR_INACTIVE',
+            targetProject: this.projectName(project),
+            targetProjectPath: project.path,
+            activeEditor: audit.editors.length === 1 ? audit.editors[0] : null,
+          },
+        );
+      }
+    }
+    return null;
   }
 
   async #dispatchSafetyViolation(project, operation) {
@@ -2786,7 +3269,7 @@ export class BrokerCore {
     const unsafe = await this.#systemSafetyViolation(
       project,
       operation.classification,
-      { force: true },
+      { force: true, requireExactActiveEditor: true },
     );
     if (unsafe) return unsafe;
 

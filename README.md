@@ -10,20 +10,21 @@ This repository is the source of truth for two maintained components:
 The old `com.signal-loop.unitycodemcpserver` package and Python/uv bridge remain at `0.7.0` for
 rollback only. They are not part of the normal automation path.
 
-## Validated baseline
+## Pinned baseline and current candidate
 
-| Component | Validated version | Role |
+| Component | Version | Role |
 | --- | --- | --- |
 | Unity Editor | `6000.3.17f1` | Pipeline host used for the 2026-08-03 live gates |
 | Unity CLI | `1.0.0-beta.3` | Official CLI and MCP child process |
 | `com.unity.pipeline` | `0.4.0-exp.1` | Official Editor command surface |
-| `com.zamgune.unity-pipeline-compat` | `0.3.0` | Structured test/recompile status, timed input, composed capture |
+| `com.zamgune.unity-pipeline-compat` | `0.4.0` candidate | Prior commands plus fail-closed single-seat Editor handoff |
 | Input System | `1.19.0` | Named InputAction injection |
 | `Tools/unity-mcp-router` | `2.0.0-dev` | LaunchAgent broker, adapters, leases, journal, install and rollback |
 
 Unity CLI is beta, Pipeline is experimental, and router v2 is still an unreleased development
-build. Pin exact versions and rerun the relevant gates before upgrading any of them. The completed
-machine validation and its proof boundary are recorded in
+build. Pin exact versions and rerun the relevant gates before upgrading any of them. Compatibility
+`0.4.0` and the Editor handoff queue remain candidates until their dedicated live gates pass. The
+completed earlier machine validation and its proof boundary are recorded in
 [VALIDATION-2026-08-03.md](Tools/unity-mcp-router/docs/VALIDATION-2026-08-03.md).
 
 Official references:
@@ -44,17 +45,19 @@ The important boundaries are:
   release directory;
 - register only the stable installed adapter in clients; do not run raw `unity mcp`, the
   source-tree router, or the legacy Python bridge beside it;
-- same-project requests are serialized, heavy work is globally bounded, and source refresh uses a
-  durable workspace lease;
+- source edits in different repositories may proceed in parallel, but the machine-wide Unity
+  import/recompile/test/build validation turn uses one durable workspace lease. Two agents must not
+  write the same repository concurrently;
 - a mutation is never automatically replayed after dispatch. A timeout, cancellation, or lost
   response becomes `UNKNOWN_OUTCOME` until independently reconciled;
 - the validated default is one Unity Editor with multiple Codex/Claude clients. Two simultaneous
   Editors require a configured floating license server with two available seats and a separate
   two-Editor soak; increasing a config number alone is not sufficient.
 
-See the [router README](Tools/unity-mcp-router/README.md) for configuration and installation, and
-the [operations guide](Tools/unity-mcp-router/docs/OPERATIONS.md) for rollout, incident, soak, and
-rollback procedures.
+See the [single-seat handoff guide](Tools/unity-mcp-router/docs/SINGLE-SEAT-HANDOFF.md) for the
+Codex/Claude operating contract, the [router README](Tools/unity-mcp-router/README.md) for
+configuration and installation, and the [operations guide](Tools/unity-mcp-router/docs/OPERATIONS.md)
+for rollout, incident, soak, and rollback procedures.
 
 ## Install the official project path
 
@@ -78,8 +81,11 @@ unity pipeline install \
 
 Do not commit a moving Git dependency for the compatibility package. This repository embeds the
 package at `Packages/com.zamgune.unity-pipeline-compat`; consuming projects use an audited embedded
-snapshot and keep its lock stanza, package version, and Pipeline version together. If a Git
-dependency is needed later, pin the release commit SHA or a published tag after that tag exists.
+snapshot compatible with their pinned Pipeline version and keep each project's lock stanza,
+package version, and Pipeline version together. The default `manual-close` rollout does not require
+all five projects to use the same compatibility snapshot; that synchronization is a separate
+`typed-auto-close` approval gate. If a Git dependency is needed later, pin the release commit SHA
+or a published tag after that tag exists.
 
 ### 2. Install the managed broker
 
@@ -113,9 +119,15 @@ additional user-scope raw Unity server. A template for Codex is available at
 
 ### 4. Verify the intended Editor
 
-Open one Editor at the canonical project path and wait for import and compilation to finish. In a
-fresh adapter session, call `unity_router_status`, then `editor_status`. Require the exact project
-path, `status=ready`, and `compiling=false` before any mutation.
+Acquire a validation turn for the canonical project with `unity_router_workspace_begin` and
+preserve its token first. A non-null `editorUse.operationId` must reach `COMPLETED` through
+`unity_router_editor_use_status`; no other result permits validation. In the default `manual-close`
+mode, normally close the currently active Editor when the handoff reports `WAITING_MANUAL_CLOSE`;
+the router opens the target exact path once. If the operation ID is missing or the handoff ends in
+any other terminal state, immediately return the original token with `unity_router_workspace_end`.
+Keep heartbeating and retry end after any reported active handoff becomes terminal. Then call
+`unity_router_status` and `editor_status` and require the exact project path, `status=ready`,
+`compiling=false`, and stopped Play Mode before any validation mutation.
 
 ## Command contract
 
@@ -129,7 +141,8 @@ path, `status=ready`, and `compiling=false` before any mutation.
 | Timed named input | `zamgune_play_begin`, `zamgune_play_step`, `zamgune_play_end` |
 | Final Game View including overlay UI | `zamgune_capture_game_view` |
 | Broker state | `unity_router_status`, `unity_router_doctor`, `unity_router_operation_status` |
-| Source-refresh ownership | `unity_router_workspace_begin`, `unity_router_workspace_heartbeat`, `unity_router_workspace_end` |
+| Editor handoff | `unity_router_editor_use`, `unity_router_editor_use_status` |
+| Validation-turn ownership | `unity_router_workspace_begin`, `unity_router_workspace_heartbeat`, `unity_router_workspace_end` |
 
 Use typed commands before `eval`. Use normal file tools for source, JSON, YAML, and serialized
 project files; live evaluation is not a file-writing transport.

@@ -1,5 +1,26 @@
 # Unity Pipeline compatibility commands
 
+## Single-seat Editor handoff
+
+Use `zamgune_handoff_status` before moving the one active Unity Editor seat to another project. Its
+`canClose` value is true only for a non-batch Editor in stable Edit Mode that is not compiling or
+updating, has no dirty or untitled scene, and has no Prefab Stage open. `blockers` is authoritative;
+the broker must not attempt to repair a blocker by saving, discarding, or stopping Play Mode.
+
+To close, call `zamgune_editor_close` with the exact `projectPath` and `currentPid` returned by
+status as `expectedProjectPath` and `expectedPid`, plus a unique non-empty `transitionId`. A path or
+PID mismatch blocks the request, preventing a stale router decision from closing a replacement
+Editor. The first accepted request reserves that transition. Repeating the identical transition
+returns `already_scheduled` without scheduling again; any other transition remains blocked until
+the first request is cancelled by its safety recheck or the Editor process closes.
+
+The command waits 750 ms, repeats its complete identity and safety probe, and invokes the Unity
+`File/Close` menu once. It never calls `EditorApplication.Exit` or sends a force signal. It does not
+automatically save, discard, or stop Play Mode. If an unsaved custom asset window is outside the
+enumerated scene/Prefab Stage state, Unity's native save confirmation is the final defense and the
+handoff queue must wait for the original PID to disappear rather than assuming the request closed
+the Editor.
+
 ## Structured asynchronous test status
 
 Pipeline `0.4.0-exp.1` keeps the official `run_tests` input contract and writes asynchronous state

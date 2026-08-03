@@ -19,6 +19,7 @@ import {
   ConfigError,
   DEFAULTS,
   canonicalizeProjects,
+  configFingerprint,
   loadConfig,
   normalizeConfig,
   parseArgv,
@@ -57,6 +58,7 @@ test('v1 config is accepted and receives all v2 defaults', (t) => {
   assert.equal(config.schemaVersion, 2);
   assert.deepEqual(config.queue, DEFAULTS.queue);
   assert.equal(config.recovery.safeReadRetries, 1);
+  assert.deepEqual(config.editorHandoff, DEFAULTS.editorHandoff);
   assert.equal(config.defaultProject, 'A');
   assert.equal(projectForAlias(config, 'A').path, realpathSync.native(projectA));
 });
@@ -109,6 +111,97 @@ test('safe-read retry and Editor seat limits are fail-closed invariants', (t) =>
     ...base,
     license: { mode: 'floating', maxConcurrentEditors: 2 },
   }, { cwd: root }).license.maxConcurrentEditors, 2);
+  assert.equal(normalizeConfig({
+    ...base,
+    license: { mode: 'floating', maxConcurrentEditors: 2 },
+  }, { cwd: root }).editorHandoff.mode, 'disabled');
+});
+
+test('single-seat Editor handoff modes and timing bounds are fail-closed', (t) => {
+  const { root, projectA } = fixture(t);
+  const base = {
+    projects: [{ name: 'A', path: projectA }],
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  };
+
+  const configured = normalizeConfig({
+    ...base,
+    editorHandoff: {
+      mode: 'typed-auto-close',
+      pollIntervalMs: 250,
+      editorExitTimeoutSec: 45,
+      startupTimeoutSec: 600,
+    },
+  }, { cwd: root });
+  assert.deepEqual(configured.editorHandoff, {
+    mode: 'typed-auto-close',
+    pollIntervalMs: 250,
+    editorExitTimeoutSec: 45,
+    startupTimeoutSec: 600,
+  });
+
+  for (const mode of ['automatic', '', null]) {
+    assert.throws(
+      () => normalizeConfig({ ...base, editorHandoff: { mode } }, { cwd: root }),
+      /editorHandoff\.mode/,
+    );
+  }
+  assert.throws(
+    () => normalizeConfig({
+      ...base,
+      license: { mode: 'floating', maxConcurrentEditors: 2 },
+      editorHandoff: { mode: 'manual-close' },
+    }, { cwd: root }),
+    /requires single-seat mode/,
+  );
+  assert.throws(
+    () => normalizeConfig({ ...base, editorHandoff: { pollIntervalMs: 99 } }, { cwd: root }),
+    /pollIntervalMs/,
+  );
+});
+
+test('config fingerprint binds Editor handoff mode and every timing gate', (t) => {
+  const { root, projectA } = fixture(t);
+  const base = {
+    projects: [{ name: 'A', path: projectA }],
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  };
+  const normalized = (editorHandoff) => normalizeConfig({ ...base, editorHandoff }, { cwd: root });
+  const manual = normalized({
+    mode: 'manual-close',
+    pollIntervalMs: 500,
+    editorExitTimeoutSec: 180,
+    startupTimeoutSec: 900,
+  });
+  const typed = normalized({
+    mode: 'typed-auto-close',
+    pollIntervalMs: 500,
+    editorExitTimeoutSec: 180,
+    startupTimeoutSec: 900,
+  });
+  const fasterPoll = normalized({
+    mode: 'manual-close',
+    pollIntervalMs: 250,
+    editorExitTimeoutSec: 180,
+    startupTimeoutSec: 900,
+  });
+  const shorterExit = normalized({
+    mode: 'manual-close',
+    pollIntervalMs: 500,
+    editorExitTimeoutSec: 120,
+    startupTimeoutSec: 900,
+  });
+  const shorterStartup = normalized({
+    mode: 'manual-close',
+    pollIntervalMs: 500,
+    editorExitTimeoutSec: 180,
+    startupTimeoutSec: 600,
+  });
+
+  assert.equal(configFingerprint(manual), configFingerprint(normalized(manual.editorHandoff)));
+  for (const changed of [typed, fasterPoll, shorterExit, shorterStartup]) {
+    assert.notEqual(configFingerprint(manual), configFingerprint(changed));
+  }
 });
 
 test('config rejects built-in tool class overrides and permits custom exact names', (t) => {
@@ -170,6 +263,12 @@ test('prepare-config stores one canonical project row for all aliases', (t) => {
       { name: 'A', path: projectA, extraArgs: ['--profile'] },
       { name: 'AliasA', path: aliasPath, extraArgs: ['--profile'] },
     ],
+    editorHandoff: {
+      mode: 'typed-auto-close',
+      pollIntervalMs: 750,
+      editorExitTimeoutSec: 240,
+      startupTimeoutSec: 960,
+    },
     logFile: path.join(state, 'broker.log'),
     broker: {
       socketPath: path.join(state, 'run', 'broker.sock'),
@@ -192,6 +291,12 @@ test('prepare-config stores one canonical project row for all aliases', (t) => {
   assert.deepEqual(prepared.projects[0].aliases, ['A', 'AliasA']);
   assert.equal(prepared.projects[0].path, realpathSync.native(projectA));
   assert.equal(prepared.defaultProject, 'AliasA');
+  assert.deepEqual(prepared.editorHandoff, {
+    mode: 'typed-auto-close',
+    pollIntervalMs: 750,
+    editorExitTimeoutSec: 240,
+    startupTimeoutSec: 960,
+  });
 });
 
 test('audited prepared project identities load without touching an unreachable project path', (t) => {

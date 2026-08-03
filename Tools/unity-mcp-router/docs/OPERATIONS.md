@@ -10,7 +10,7 @@
 | --- | --- |
 | broker single ownership | `launchd` job 1개, broker PID 1개, 모든 Codex/Claude adapter가 connect-only |
 | 정확한 project routing | 5개 checkout의 canonical identity가 겹치지 않고 cross-project misroute 0건 |
-| bounded concurrency | same-project single-flight, default global heavy 1, source-refresh writer 1, queue overflow/deadline이 명시적 오류 |
+| bounded concurrency | same-project single-flight, default global heavy 1, Unity validation turn 1, queue overflow/deadline이 명시적 오류 |
 | mutation integrity | dispatch 뒤 automatic mutation replay 0건, adapter 전달 ACK 전 `DELIVERING`, 미확정 결과는 durable `UNKNOWN_OUTCOME` fence |
 | async integrity | build/switch/recompile/test/package 작업이 status terminal까지 `RUNNING`, lease 조기 해제 0건 |
 | multi-agent support | Codex와 Claude Code가 동시에 연결되고 한 client 종료가 다른 client/child에 영향 0건 |
@@ -24,7 +24,7 @@
 2. project 선택은 절대 `--project-path`다. cwd 추측과 제거된 `--instance`에 의존하지 않는다. [Unity CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-reference)
 3. 기본 license capacity는 Editor 1개다. 2 Editor 시험은 floating entitlement와 실제 seat가 확인된 경우에만 별도 gate로 연다. [Unity Editor Software Terms](https://unity.com/legal/editor-terms-of-service/software), [Unity Licensing Server](https://docs.unity.com/licensing/en-us/manual)
 4. MCP cancellation은 rollback이 아니다. dispatch 뒤 취소/timeout/connection loss를 실패로 단정하거나 같은 mutation을 재전송하지 않는다. [MCP cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation)
-5. Editor와 broker가 안정적이어도 두 agent가 동시에 같은 source tree를 수정하는 것은 안전하지 않다. 분석과 safe read는 병렬화하고, Unity source/assets/packages write와 source refresh는 workspace guard로 직렬화한다.
+5. 서로 다른 repository의 source 편집은 병행할 수 있지만 같은 repository의 동시 writer는 안전하지 않다. agent/worktree/Git ownership으로 이를 금지하고, Unity import/recompile/test/build validation은 machine-wide workspace turn으로 직렬화한다. inactive project의 safe read는 Editor를 자동 전환하지 않는다.
 
 ## Phase 0 — baseline과 차단 gate
 
@@ -169,9 +169,9 @@ upgrade/rollback 중 이미 떠 있던 adapter는 broker와 build ID가 다르�
 각 단계에서 다음 절차를 반복한다.
 
 1. 해당 project의 dirty state를 다시 기록한다. 다른 project의 client config는 아직 바꾸지 않는다.
-2. single-seat에서는 이전 canary Editor를 닫고 완전히 종료된 것을 확인한 뒤 대상 Editor 하나만 연다.
-3. Codex `.codex/config.toml`과 Claude Code local MCP를 stable adapter + 해당 `--default` alias로 바꾼다. raw/legacy server를 동시에 켜지 않는다.
-4. doctor와 smoke를 실행한다.
+2. Codex `.codex/config.toml`과 Claude Code local MCP를 stable adapter + 해당 `--default` alias로 바꾼다. raw/legacy server를 동시에 켜지 않는다.
+3. 한 MCP session에서 `unity_router_workspace_begin(project)`으로 validation turn을 획득하고 token을 먼저 보존한다. non-null `editorUse.operationId`만 폴링하며 `COMPLETED`일 때만 계속한다. operation ID가 없거나 다른 terminal 상태면 검증하지 않고 즉시 원래 token으로 end한다. end가 active handoff 때문에 거부되면 heartbeat와 status poll을 유지한 뒤 재시도한다. `WAITING_MANUAL_CLOSE`이면 사용자가 이전 Editor를 정상 Close한다. target Editor를 수동으로 미리 열거나 background safe read로 깨우지 않는다.
+4. handoff가 `COMPLETED`된 뒤 doctor와 smoke를 실행한다.
 
    ```sh
    ROUTER_HOME=/Users/zamgune/.unity-mcp-router
@@ -185,11 +185,11 @@ upgrade/rollback 중 이미 떠 있던 adapter는 broker와 build ID가 다르�
      --project PROJECT_ALIAS smoke --json
    ```
 
-5. Codex와 Claude에서 동시에 `editor_status` safe read를 호출한다. 결과가 현재 canary project와 Editor를 가리키는지 확인한다.
+5. Codex와 Claude에서 동시에 `editor_status` safe read를 호출한다. 결과가 현재 canary project와 Editor를 가리키는지 확인한다. inactive alias safe read는 `PROJECT_EDITOR_INACTIVE`이고 Editor PID 변화가 없어야 한다.
 6. 한 client adapter를 정상 종료하고 다시 연결한다. 다른 client session과 project child가 계속 동작해야 한다. 동기 mutation canary에서는 응답 전달 ACK가 끝난 뒤 `deliveryPending`이 0인지도 확인한다.
-7. 해당 project에서 `recompile`을 한 번 실행하고 `recompile_status`가 terminal (`completed` 또는 `up_to_date`)이 될 때까지 확인한다. domain reload 뒤 tool list가 복구되고 필요한 client에만 list-changed가 전달돼야 한다.
+7. turn을 소유한 같은 MCP session에서 해당 project의 `recompile`을 한 번 실행하고 `recompile_status`가 terminal (`completed` 또는 `up_to_date`)이 될 때까지 확인한다. domain reload 뒤 tool list가 복구되고 필요한 client에만 list-changed가 전달돼야 한다.
 8. 별도의 clean/disposable 상태에서만 mutation cancellation/fault canary를 한다. dispatch 뒤 중복 marker가 0이고, 결과 미확정 시 정확히 하나의 `UNKNOWN_OUTCOME`와 project fence가 생기는지 확인한다. 운영 checkout이 dirty하면 이 단계는 fake integration evidence로 대체하고 이유를 기록한다.
-9. canary 종료 시 queue, lease, workspace lease, background operation, unknown outcome가 모두 비어 있고 `processAudit.ok=true`인지 확인한다.
+9. tracked async/import/compile terminal 뒤 `unity_router_workspace_end`로 turn을 반납한다. canary 종료 시 queue, lease, workspace lease, background operation, unknown outcome가 모두 비어 있고 `processAudit.ok=true`인지 확인한다.
 10. 해당 project의 Codex와 Claude를 둘 다 통과시킨 뒤에만 다음 project로 이동한다.
 
 project별 통과 기록:
@@ -203,6 +203,14 @@ project별 통과 기록:
 | OhMyFarm |  |  |  |  |  |  |  |  |
 
 한 project가 실패하면 다음 project 설정을 바꾸지 않는다. 해당 client config를 backup에서 복원하고, broker 자체 문제면 Phase 7 rollback으로 간다.
+
+다섯 project의 순차 smoke는 새 Editor handoff의 충분한 증거가 아니다. `manual-close` 1차
+승격에는 별도의 clean A -> B -> A 왕복 canary가 필요하다. 각 전환에서 Editor PID가 정확히
+하나인지, `WAITING_MANUAL_CLOSE`에서만 사용자가 정상 Close했는지, router의 exact
+`unity open` dispatch가 1회인지, target readiness와 clean closeout을 기록한다. Codex와
+Claude가 동시에 서로 다른 validation turn을 요청했을 때 한쪽만 소유하고 다른 쪽은
+대기해야 한다. 세부 gate와 typed-auto-close의 추가 조건은
+[SINGLE-SEAT-HANDOFF.md](SINGLE-SEAT-HANDOFF.md)를 따른다.
 
 ## Phase 5 — 60분 multi-agent soak
 
@@ -298,8 +306,14 @@ entitlement 확인 뒤에만 candidate config를 다음처럼 새 versioned depl
 "license": {
   "mode": "floating",
   "maxConcurrentEditors": 2
+},
+"editorHandoff": {
+  "mode": "disabled"
 }
 ```
+
+`manual-close`와 `typed-auto-close`는 single-seat 전용이므로 floating candidate에서
+`editorHandoff.mode=disabled`를 함께 설정하지 않으면 config validation이 실패해야 정상이다.
 
 두 Editor는 서로 다른 canonical project를 열어야 한다. 동일 project 중복 Editor는 floating seat가 있어도 금지된다. 60분 동안 다음을 검증한다.
 
@@ -318,6 +332,8 @@ entitlement 확인 뒤에만 candidate config를 다음처럼 새 versioned depl
 
 - per-client outstanding 32, per-project 128, machine total 512.
 - project scheduler는 active operation 하나이며 client별 round-robin fairness를 사용한다.
+- 서로 다른 repository의 source 편집은 validation turn 밖에서도 병행할 수 있다. 같은
+  repository의 동시 writer는 router가 해결하지 않으므로 agent/Git ownership으로 금지한다.
 - 동기 mutation은 Unity 응답 뒤에도 adapter가 응답 전달을 ACK할 때까지 `DELIVERING` 상태와 project fence를 유지한다. 다음 same-project mutation은 ACK보다 앞설 수 없다.
 - 비동기 작업의 terminal status를 다른 agent가 먼저 관찰해도 trigger 응답의 ACK/LOST 결정 전에는 tracker와 heavy/source-refresh/exclusive lease를 최대 ACK timeout까지 유지한다.
 - heavy/exclusive/tracked-async/unknown tool은 machine-wide heavy budget 1을 사용한다.
@@ -326,19 +342,25 @@ entitlement 확인 뒤에만 candidate config를 다음처럼 새 versioned depl
 - lease TTL 만료는 capacity를 다른 agent에 자동 양도하지 않는다. `orphaned`로 남아 fail-closed 한다.
 - workspace lease는 durable file에 기록돼 broker restart 뒤 복구된다. 같은 client/session만 heartbeat/end할 수 있다.
 
-작업 시작 전:
+validation 시작 전:
 
-1. source/asset/package write 여부를 분류한다.
-2. write라면 workspace guard를 먼저 잡는다. `unity_router_workspace_begin`은 대기 전과 grant 직후 강제 process audit를 하며, heartbeat도 재감사한다. 어느 단계에서든 audit가 실패하면 lease 없이 쓰기를 시작하거나 기존 write를 계속하지 않는다.
-3. Editor가 import/compile 중이면 Unity mutation을 시작하지 않는다.
-4. tracked async trigger가 `RUNNING`이면 status tool 외 새 mutation을 보내지 않는다.
-5. broker가 `RUNNING` operation을 restart 후 복구했거나 추적 중 trigger adapter가 끊겼다면 terminal 뒤 `UNKNOWN_OUTCOME`가 되는 것이 정상 fail-closed 동작이다. 실제 terminal 결과를 확인해 resolve한다.
+1. source 편집의 repository ownership과 dirty fingerprint를 기록한다.
+2. Unity import/recompile/test/build가 필요하면 같은 MCP session에서 validation turn을 잡는다.
+   `unity_router_workspace_begin`은 turn grant 뒤 matching Editor handoff를 queue하며, 반환된
+   token을 먼저 보존한다. non-null `editorUse.operationId`가 `COMPLETED`될 때까지 heartbeat와
+   status poll을 유지한다. operation ID가 없거나 다른 terminal 상태면 validation 없이 즉시
+   end하고, active handoff로 end가 거부되면 heartbeat/poll 뒤 재시도한다.
+3. `manual-close`의 `WAITING_MANUAL_CLOSE`에서는 사용자가 현재 Editor를 정상 Close한다.
+   agent가 save/discard/modal/Play stop/TERM/KILL을 대신하지 않는다.
+4. Editor가 exact target path이고 Pipeline ready이며 import/compile과 Play가 멈춘 뒤에만 Unity mutation을 시작한다.
+5. tracked async trigger가 `RUNNING`이면 status tool 외 새 mutation을 보내지 않는다.
+6. broker가 `RUNNING` operation을 restart 후 복구했거나 추적 중 trigger adapter가 끊겼다면 terminal 뒤 `UNKNOWN_OUTCOME`가 되는 것이 정상 fail-closed 동작이다. 실제 terminal 결과를 확인해 resolve한다.
 
 작업 종료 전:
 
 1. tracked async가 terminal인지 확인한다.
 2. Editor import/compile이 멈췄는지 확인한다.
-3. workspace lease를 정상 end한다.
+3. validation-turn workspace lease를 정상 end한다.
 4. status에서 queue/lease/fence가 예상대로 비었는지 확인한다.
 
 ## 장애 대응
@@ -354,7 +376,7 @@ entitlement 확인 뒤에만 candidate config를 다음처럼 새 versioned depl
 - finding의 PID/kind/project path를 먼저 확인한다.
 - raw `unity mcp`, source-tree/legacy adapter, duplicate broker를 정상 종료하고 해당 client config를 stable adapter로 바꾼다.
 - 동일 project Editor가 둘이면 하나를 닫는다.
-- `unconfigured_editor` 또는 `editor_project_unknown`이면 Editor를 닫고 config에 기록된 exact canonical path로 다시 연다. symlink 표기는 floating 2-seat에서도 허용하지 않는다.
+- `unconfigured_editor` 또는 `editor_project_unknown`이면 Editor를 정상 종료하고 config identity를 확인한 뒤 validation turn으로 exact canonical path handoff를 다시 요청한다. symlink 표기는 floating 2-seat에서도 허용하지 않는다.
 - seat overflow면 entitlement를 확인하기 전 Editor 수를 줄인다.
 - `processAuditEnforcement=report-only`로 우회해 운영하지 않는다.
 
@@ -402,6 +424,25 @@ entitlement 확인 뒤에만 candidate config를 다음처럼 새 versioned depl
 
 `RESULT_DELIVERY_UNCERTAIN` 또는 response ACK timeout은 Unity 실행 실패를 뜻하지 않는다. Unity side effect가 성공했지만 client가 결과를 받지 못했을 수 있으므로 일반 timeout처럼 같은 mutation을 다시 보내면 안 된다.
 
+Editor close/open handoff의 `UNKNOWN_OUTCOME`도 같은 규칙을 적용한다. 반환된 parent UUID를
+`unity-mcp-router-admin editor status UUID`와 `operation status UUID`로 조회하고 exact Editor
+PID/project path, Pipeline/Console과 실제 side effect를 독립 확인한다. close, `unity open` 또는
+validation mutation을 다시 보내지 않는다. 완료가 확인된 parent operation만 위 절차로
+resolve한다. 지원되는 parent UUID를 `confirmed_completed`로 resolve하면 broker가 해당
+handoff의 내부 `:open` journal record도 먼저 같은 resolution으로 해소한다. 내부 suffix
+id를 stable admin에 직접 전달할 필요는 없다.
+
+### Editor handoff blocker 또는 `WAITING_MANUAL_CLOSE`
+
+- `WAITING_MANUAL_CLOSE`는 장애가 아니다. 사용자가 Unity의 정상 Close와 필요한 저장 결정을
+  완료할 때까지 turn owner가 heartbeat를 유지한다.
+- `dirty_scene`, `untitled_scene`, `prefab_stage_open`, `dirty_prefab_stage`, `compiling`,
+  `updating`, `play_mode`, identity mismatch는 자동 우회하지 않는다.
+- standalone `unity-mcp-router-admin editor use PROJECT`는 validation turn을 예약하지 않는다.
+  test/build 보호에는 `workspace_begin` 또는 CLI `workspace guard`를 사용한다.
+- `typed-auto-close`는 5개 embedded package 동기화, disposable negative test와 clean
+  A -> B -> A canary 전에는 활성화하지 않는다.
+
 ### workspace heartbeat/end 실패
 
 - guarded command는 즉시 write를 중단한다.
@@ -424,6 +465,10 @@ entitlement 확인 뒤에만 candidate config를 다음처럼 새 versioned depl
 ## Phase 7 — rollback
 
 관리된 previous deployment가 있을 때 stable wrapper를 사용한다.
+
+rollback 전 active Editor handoff와 validation turn이 terminal이어야 한다. `WAITING_*`,
+`QUIT_DISPATCHED`, `OPEN_DISPATCHED`, unresolved workspace lease 또는 lifecycle
+`UNKNOWN_OUTCOME`가 있으면 강행하지 않고 독립 검증과 reconciliation 뒤 drain한다.
 
 ```sh
 /Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-rollback \

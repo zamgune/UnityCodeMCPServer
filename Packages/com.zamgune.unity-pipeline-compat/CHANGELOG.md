@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0] - 2026-08-03
+
+- Added `zamgune_handoff_status` with exact project/PID identity, compile/import and Play Mode
+  state, open-scene dirty/untitled state, Prefab Stage state, and fail-closed blockers.
+- Added `zamgune_editor_close`, requiring `expectedProjectPath`, `expectedPid`, and `transitionId`.
+  It reserves one idempotent transition, repeats the complete safety check after a 750 ms response
+  window, and invokes Unity's normal `File/Close` menu exactly once.
+- Kept all destructive policy outside the command: it never saves, discards, stops Play Mode,
+  calls `EditorApplication.Exit`, or sends a process signal. Batch mode is always blocked.
+- Added Editor tests for command metadata, clean readiness, every safety/identity blocker,
+  idempotent scheduling, delayed recheck cancellation, and menu/scheduler failure recovery without
+  closing the test Editor.
+
 ## [0.3.0] - 2026-08-02
 
 - Pinned the official Unity Pipeline dependency to `0.4.0-exp.1` for authentication-token

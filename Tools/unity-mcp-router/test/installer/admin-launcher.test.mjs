@@ -135,6 +135,20 @@ test('stable admin operation grammar forwards exact immutable deployment argumen
   const f = fixture(t);
   const accepted = [
     {
+      argv: ['editor', 'use', 'SheepWolf'],
+      forwarded: [
+        'editor', 'use', 'SheepWolf',
+        '--runtime-root', f.release, '--config', path.join(f.deployment, 'config.json'),
+      ],
+    },
+    {
+      argv: ['editor', 'status', OPERATION_ID],
+      forwarded: [
+        'editor', 'status', OPERATION_ID,
+        '--runtime-root', f.release, '--config', path.join(f.deployment, 'config.json'),
+      ],
+    },
+    {
       argv: ['operation', 'status', OPERATION_ID],
       forwarded: [
         'operation', 'status', OPERATION_ID,
@@ -195,6 +209,13 @@ test('stable admin operation grammar forwards exact immutable deployment argumen
     ['call', 'unity_router_operation_status', '{}'],
     ['restart', 'fixture'],
     ['workspace', 'resolve', 'lease-token', '--confirm'],
+    ['editor'],
+    ['editor', 'use'],
+    ['editor', 'use', '../SheepWolf'],
+    ['editor', 'use', '--project'],
+    ['editor', 'status', 'op-1'],
+    ['editor', 'status', OPERATION_ID, '--timeout-sec'],
+    ['editor', 'resolve', OPERATION_ID],
     ['operation'],
     ['operation', 'status'],
     ['operation', 'status', 'op-1'],

@@ -10,6 +10,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function usage() {
   process.stderr.write(
     'usage: broker-admin.mjs <status|doctor|drain|resume> --runtime-root DIR --config FILE [--timeout-sec N]\n' +
+    '       broker-admin.mjs editor use PROJECT --runtime-root DIR --config FILE\n' +
+    '       broker-admin.mjs editor status UUID --runtime-root DIR --config FILE\n' +
     '       broker-admin.mjs operation status UUID --runtime-root DIR --config FILE\n' +
     '       broker-admin.mjs operation resolve UUID confirmed_completed [--confirm-no-longer-running] --runtime-root DIR --config FILE\n',
   );
@@ -33,6 +35,18 @@ function parseArgs(argv) {
   const command = argv[0];
   if (['status', 'doctor', 'drain', 'resume'].includes(command)) {
     return { command, ...parseRuntimeArgs(argv.slice(1), { allowTimeout: true }) };
+  }
+  if (command === 'editor') {
+    const editorAction = argv[1];
+    const subject = argv[2];
+    if (!['use', 'status'].includes(editorAction) || !subject || subject.startsWith('--')) usage();
+    if (editorAction === 'status' && !UUID.test(subject)) usage();
+    return {
+      command,
+      editor_action: editorAction,
+      ...(editorAction === 'use' ? { project: subject } : { operation_id: subject }),
+      ...parseRuntimeArgs(argv.slice(3), { allowTimeout: false }),
+    };
   }
   if (command !== 'operation') usage();
 
@@ -244,6 +258,12 @@ try {
   if (args.command === 'operation' && args.operation_action === 'status') {
     tool = 'unity_router_operation_status';
     toolArguments = { operationId: args.operation_id };
+  } else if (args.command === 'editor' && args.editor_action === 'use') {
+    tool = 'unity_router_editor_use';
+    toolArguments = { project: args.project };
+  } else if (args.command === 'editor' && args.editor_action === 'status') {
+    tool = 'unity_router_editor_use_status';
+    toolArguments = { operationId: args.operation_id };
   } else if (args.command === 'operation' && args.operation_action === 'resolve') {
     tool = 'unity_router_operation_resolve';
     toolArguments = {
@@ -270,7 +290,9 @@ try {
   write({
     ok,
     command: args.command,
-    ...(args.operation_action ? { action: args.operation_action } : {}),
+    ...((args.operation_action ?? args.editor_action)
+      ? { action: args.operation_action ?? args.editor_action }
+      : {}),
     result: structured,
   });
   process.exitCode = ok ? 0 : 3;

@@ -12,7 +12,11 @@ import { OperationJournal } from '../../lib/operation-journal.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const FAKE_UNITY = path.join(ROOT, 'test/fixtures/fake-unity.mjs');
 
-async function fixture(t, { projects = ['A'], processAuditEnforcement = 'enforce' } = {}) {
+async function fixture(t, {
+  projects = ['A'],
+  processAuditEnforcement = 'enforce',
+  license = { mode: 'floating', maxConcurrentEditors: 2 },
+} = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'broker-core-safety-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const entries = [];
@@ -31,7 +35,7 @@ async function fixture(t, { projects = ['A'], processAuditEnforcement = 'enforce
     projects: entries,
     reauthIntervalMin: 0,
     queue: { maxPendingPerClient: 8, maxPendingPerProject: 16, maxPendingTotal: 32, maxHeavyInFlight: 1, deadlineSec: 3 },
-    license: { mode: 'floating', maxConcurrentEditors: 2 },
+    license,
     broker: {
       socketPath: path.join(root, 'run', 'broker.sock'),
       journalFile: path.join(root, 'operations.jsonl'),
@@ -159,6 +163,671 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function fakeEditorLifecycle(config) {
+  const snapshots = new Map();
+  const calls = [];
+  return {
+    calls,
+    async ensureProject(project) {
+      calls.push(project.key);
+      const existing = [...snapshots.values()].find((entry) => entry.target.projectKey === project.key);
+      if (existing) return existing;
+      const value = Object.freeze({
+        operationId: '123e4567-e89b-42d3-a456-426614174000',
+        target: Object.freeze({
+          project: project.name,
+          projectKey: project.key,
+          projectPath: project.path,
+        }),
+        state: 'QUEUED',
+        blockers: Object.freeze([]),
+        mode: config.editorHandoff.mode,
+      });
+      snapshots.set(value.operationId, value);
+      return value;
+    },
+    status(operationId) { return snapshots.get(operationId) ?? null; },
+    complete(operationId) {
+      const current = snapshots.get(operationId);
+      if (!current) return null;
+      const completed = Object.freeze({ ...current, state: 'COMPLETED' });
+      snapshots.set(operationId, completed);
+      return completed;
+    },
+    activeStatus() { return null; },
+    close() {},
+  };
+}
+
+test('editor use is admin-gated while status and workspace validation turns expose the tracked handoff', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const editorLifecycle = fakeEditorLifecycle(harness.config);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const ordinary = attach(core, 'A', { clientId: 'ordinary-editor-client' });
+  const admin = attach(core, 'A', { clientId: 'admin-editor-client', isAdmin: true });
+  for (const client of [ordinary, admin]) {
+    await client.request(1, 'initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+    });
+  }
+
+  const denied = await ordinary.request(2, 'tools/call', {
+    name: 'unity_router_editor_use', arguments: { project: 'A' },
+  });
+  assert.equal(denied.result.isError, true);
+  assert.equal(denied.result.structuredContent.code, 'ADMIN_REQUIRED');
+
+  const started = await admin.request(2, 'tools/call', {
+    name: 'unity_router_editor_use', arguments: { project: 'A' },
+  });
+  const operationId = started.result.structuredContent.operationId;
+  assert.equal(operationId, '123e4567-e89b-42d3-a456-426614174000');
+  const observed = await ordinary.request(3, 'tools/call', {
+    name: 'unity_router_editor_use_status', arguments: { operationId },
+  });
+  assert.equal(observed.result.structuredContent.target.project, 'A');
+
+  const workspace = await ordinary.request(4, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  assert.equal(workspace.result.isError, undefined);
+  assert.equal(workspace.result.structuredContent.editorUse.operationId, operationId);
+  editorLifecycle.complete(operationId);
+  const ended = await ordinary.request(5, 'tools/call', {
+    name: 'unity_router_workspace_end',
+    arguments: { leaseToken: workspace.result.structuredContent.token },
+  });
+  assert.equal(ended.result.isError, undefined);
+  assert.equal(editorLifecycle.calls.length, 2);
+});
+
+test('confirmed parent Editor handoff resolution clears its internal open fence first', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const project = harness.config.projects[0];
+  const operationId = '123e4567-e89b-42d3-a456-426614174099';
+  const openOperationId = `${operationId}:open`;
+  await journal.recordReceived({
+    operationId,
+    project: project.name,
+    projectKey: project.key,
+    method: 'unity_router_editor_use',
+    payload: { projectKey: project.key },
+  });
+  await journal.markQueued(operationId);
+  await journal.markDispatching(operationId);
+  await journal.markUnknownOutcome(operationId);
+  await journal.recordReceived({
+    operationId: openOperationId,
+    project: project.name,
+    projectKey: project.key,
+    method: 'unity_router_editor_open',
+    payload: { parentOperationId: operationId, projectKey: project.key },
+  });
+  await journal.markQueued(openOperationId);
+  await journal.markDispatching(openOperationId);
+  await journal.markUnknownOutcome(openOperationId);
+
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const admin = attach(core, 'A', { clientId: 'editor-resolution-admin', isAdmin: true });
+  await admin.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const resolved = await admin.request(2, 'tools/call', {
+    name: 'unity_router_operation_resolve',
+    arguments: { operationId, resolution: 'confirmed_completed' },
+  });
+  assert.equal(resolved.result.isError, undefined);
+  assert.equal(resolved.result.structuredContent.operationId, operationId);
+  assert.equal(resolved.result.structuredContent.state, 'RESOLVED');
+  assert.equal(resolved.result.structuredContent.editorOpenResolution.operationId, openOperationId);
+  assert.equal(resolved.result.structuredContent.editorOpenResolution.state, 'RESOLVED');
+  assert.equal(journal.get(openOperationId).state, 'RESOLVED');
+  assert.equal(journal.get(operationId).state, 'RESOLVED');
+  assert.equal(core.unknownByProject.has(project.key), false);
+});
+
+test('single-seat inactive projects expose management tools without spawning a blind Unity MCP child', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'inactive-project-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const listed = await client.request(2, 'tools/list');
+  assert(listed.result.tools.some((tool) => tool.name === 'unity_router_editor_use_status'));
+  assert(!listed.result.tools.some((tool) => tool.name === 'editor_status'));
+  const call = await client.request(3, 'tools/call', { name: 'editor_status', arguments: {} });
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.code, 'PROJECT_EDITOR_INACTIVE');
+  assert.equal(core.children.size, 0);
+});
+
+test('single-seat inactive project remains fail-closed when unrelated audit findings make ok false', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    processAuditor: async () => ({
+      ok: false,
+      findings: [{ severity: 'error', kind: 'legacy_or_unattached_adapter', pid: 9001 }],
+      editors: [],
+    }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'inactive-audit-finding-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const listed = await client.request(2, 'tools/list');
+  assert(!listed.result.tools.some((tool) => tool.name === 'editor_status'));
+  const call = await client.request(3, 'tools/call', { name: 'editor_status', arguments: {} });
+  assert.equal(call.result.structuredContent.code, 'EDITOR_PROCESS_AUDIT_UNSAFE');
+  assert.equal(core.children.size, 0);
+});
+
+test('single-seat child gate rejects error findings even if process audit ok is inconsistent', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    processAuditor: async () => ({
+      ok: true,
+      findings: [{ severity: 'error', kind: 'duplicate_broker', pid: 9002 }],
+      editors: [{ pid: 778, projectPath: harness.config.projects[0].path }],
+    }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'inconsistent-audit-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const listed = await client.request(2, 'tools/list');
+  assert(!listed.result.tools.some((tool) => tool.name === 'editor_status'));
+  assert.equal(core.children.size, 0);
+});
+
+test('single-seat process audit failure blocks child startup with a typed error', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+    processAuditEnforcement: 'report-only',
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    processAuditor: async () => ({
+      ok: false,
+      findings: [{ severity: 'error', kind: 'process_audit_failed', message: 'ps unavailable' }],
+      editors: [],
+    }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'audit-unavailable-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const call = await client.request(2, 'tools/call', { name: 'editor_status', arguments: {} });
+  assert.equal(call.result.structuredContent.code, 'EDITOR_PROCESS_AUDIT_UNAVAILABLE');
+  assert.equal(core.children.size, 0);
+});
+
+test('floating validation turn preserves the legacy lease-only guard without Editor handoff', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const editorLifecycle = fakeEditorLifecycle(harness.config);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'floating-workspace-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const begun = await client.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  assert.equal(begun.result.isError, undefined);
+  assert.equal(begun.result.structuredContent.editorUse, null);
+  assert.equal(editorLifecycle.calls.length, 0);
+  const ended = await client.request(3, 'tools/call', {
+    name: 'unity_router_workspace_end',
+    arguments: { leaseToken: begun.result.structuredContent.token },
+  });
+  assert.equal(ended.result.isError, undefined);
+});
+
+test('validation turn cannot end or resolve while manual Editor handoff is non-terminal', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let active = null;
+  const editorLifecycle = {
+    async ready() {},
+    async ensureProject(project) {
+      active = Object.freeze({
+        operationId: '123e4567-e89b-42d3-a456-426614174001',
+        target: Object.freeze({ project: project.name, projectKey: project.key, projectPath: project.path }),
+        state: 'WAITING_MANUAL_CLOSE',
+        blockers: Object.freeze([]),
+        mode: 'manual-close',
+      });
+      return active;
+    },
+    status(operationId) { return active?.operationId === operationId ? active : null; },
+    activeStatus() { return active; },
+    async close() { active = null; },
+  };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const owner = attach(core, 'A', { clientId: 'manual-handoff-owner' });
+  const admin = attach(core, 'A', { clientId: 'manual-handoff-admin', isAdmin: true });
+  for (const client of [owner, admin]) {
+    await client.request(1, 'initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+    });
+  }
+
+  const begun = await owner.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  const token = begun.result.structuredContent.token;
+  const ended = await owner.request(3, 'tools/call', {
+    name: 'unity_router_workspace_end', arguments: { leaseToken: token },
+  });
+  assert.equal(ended.result.isError, true);
+  assert.equal(ended.result.structuredContent.code, 'WORKSPACE_EDITOR_HANDOFF_ACTIVE');
+  const resolved = await admin.request(2, 'tools/call', {
+    name: 'unity_router_workspace_resolve', arguments: { leaseToken: token, confirm: true },
+  });
+  assert.equal(resolved.result.isError, true);
+  assert.equal(resolved.result.structuredContent.code, 'WORKSPACE_EDITOR_HANDOFF_ACTIVE');
+});
+
+test('workspace begin keeps its lease when Editor handoff setup throws until the exact owner ends it', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let ensureCalls = 0;
+  const editorLifecycle = {
+    async ready() {},
+    async ensureProject() {
+      ensureCalls += 1;
+      const error = new Error('deterministic Editor handoff setup failure');
+      error.code = 'EDITOR_HANDOFF_SETUP_FAILED';
+      throw error;
+    },
+    status() { return null; },
+    activeStatus() { return null; },
+    async close() {},
+  };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const owner = attach(core, 'A', { clientId: 'handoff-throw-owner' });
+  const contender = attach(core, 'A', { clientId: 'handoff-throw-contender' });
+  for (const client of [owner, contender]) {
+    await client.request(1, 'initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+    });
+  }
+
+  const begun = await owner.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  const token = begun.result.structuredContent.token;
+  assert.equal(begun.result.isError, undefined);
+  assert.equal(typeof token, 'string');
+  assert.equal(begun.result.structuredContent.state, 'active');
+  assert.equal(begun.result.structuredContent.editorUse.operationId, null);
+  assert.equal(begun.result.structuredContent.editorUse.state, 'BLOCKED');
+  assert.deepEqual(begun.result.structuredContent.editorUse.blockers, ['EDITOR_HANDOFF_SETUP_FAILED']);
+  assert.equal(begun.result.structuredContent.editorUse.target.project, 'A');
+  assert.equal(begun.result.structuredContent.editorUse.message, 'deterministic Editor handoff setup failure');
+  assert.equal(core.workspaceRecords.get(token)?.editorUseOperationId, null);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 1);
+
+  const contenderBegin = contender.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  await waitUntil(() => core.leases.listQueued({ key: 'source-refresh' }).length === 1);
+  assert.equal(contender.messages.some((message) => message.id === 2), false);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 1);
+
+  const ended = await owner.request(3, 'tools/call', {
+    name: 'unity_router_workspace_end', arguments: { leaseToken: token },
+  });
+  assert.equal(ended.result.isError, undefined);
+  assert.deepEqual(ended.result.structuredContent, { token, project: 'A', state: 'RELEASED' });
+  assert.equal(core.workspaceRecords.has(token), false);
+
+  const contenderBegun = await contenderBegin;
+  const contenderToken = contenderBegun.result.structuredContent.token;
+  assert.equal(contenderBegun.result.isError, undefined);
+  assert.notEqual(contenderToken, token);
+  assert.equal(contenderBegun.result.structuredContent.editorUse.operationId, null);
+  assert.equal(contenderBegun.result.structuredContent.editorUse.state, 'BLOCKED');
+  assert.equal(ensureCalls, 2);
+  const contenderEnded = await contender.request(3, 'tools/call', {
+    name: 'unity_router_workspace_end', arguments: { leaseToken: contenderToken },
+  });
+  assert.equal(contenderEnded.result.isError, undefined);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 0);
+});
+
+test('workspace end releases a lease after its tracked Editor handoff reaches a non-COMPLETED terminal state', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const operationId = '123e4567-e89b-42d3-a456-426614174002';
+  let state = 'WAITING_MANUAL_CLOSE';
+  let target = null;
+  const snapshot = () => Object.freeze({
+    operationId,
+    target,
+    state,
+    blockers: Object.freeze([]),
+    mode: 'manual-close',
+  });
+  const editorLifecycle = {
+    async ready() {},
+    async ensureProject(project) {
+      target = Object.freeze({ project: project.name, projectKey: project.key, projectPath: project.path });
+      return snapshot();
+    },
+    status(candidate) { return candidate === operationId ? snapshot() : null; },
+    activeStatus() { return snapshot(); },
+    async close() {},
+  };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const owner = attach(core, 'A', { clientId: 'terminal-handoff-owner' });
+  await owner.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const begun = await owner.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  const token = begun.result.structuredContent.token;
+  assert.equal(begun.result.structuredContent.editorUse.operationId, operationId);
+  assert.equal(core.workspaceRecords.get(token)?.editorUseOperationId, operationId);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 1);
+
+  state = 'CANCELLED';
+  const ended = await owner.request(3, 'tools/call', {
+    name: 'unity_router_workspace_end', arguments: { leaseToken: token },
+  });
+  assert.equal(ended.result.isError, undefined);
+  assert.deepEqual(ended.result.structuredContent, { token, project: 'A', state: 'RELEASED' });
+  assert.equal(core.workspaceRecords.has(token), false);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 0);
+});
+
+test('workspace with no recorded handoff id waits for another active handoff to become terminal', async (t) => {
+  const harness = await fixture(t, {
+    projects: ['A', 'B'],
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const otherProject = harness.config.projects.find((project) => project.name === 'B');
+  const operationId = '123e4567-e89b-42d3-a456-426614174003';
+  let activeState = 'WAITING_TARGET_PROCESS';
+  const activeSnapshot = () => Object.freeze({
+    operationId,
+    target: Object.freeze({
+      project: otherProject.name,
+      projectKey: otherProject.key,
+      projectPath: otherProject.path,
+    }),
+    state: activeState,
+    blockers: Object.freeze([]),
+    mode: 'manual-close',
+  });
+  const editorLifecycle = {
+    async ready() {},
+    async ensureProject() {
+      const error = new Error('target handoff cannot start while another handoff owns the lifecycle');
+      error.code = 'EDITOR_HANDOFF_ALREADY_ACTIVE';
+      throw error;
+    },
+    status() { return null; },
+    activeStatus() { return activeSnapshot(); },
+    async close() {},
+  };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const owner = attach(core, 'A', { clientId: 'untracked-active-handoff-owner' });
+  await owner.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const begun = await owner.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  const token = begun.result.structuredContent.token;
+  assert.equal(begun.result.structuredContent.editorUse.operationId, null);
+  assert.equal(core.workspaceRecords.get(token)?.editorUseOperationId, null);
+
+  const blocked = await owner.request(3, 'tools/call', {
+    name: 'unity_router_workspace_end', arguments: { leaseToken: token },
+  });
+  assert.equal(blocked.result.isError, true);
+  assert.equal(blocked.result.structuredContent.code, 'WORKSPACE_EDITOR_HANDOFF_ACTIVE');
+  assert.equal(blocked.result.structuredContent.editorUse.operationId, operationId);
+  assert.equal(blocked.result.structuredContent.editorUse.state, 'WAITING_TARGET_PROCESS');
+  assert.equal(blocked.result.structuredContent.editorUse.target.project, 'B');
+  assert.equal(core.workspaceRecords.has(token), true);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 1);
+
+  activeState = 'FAILED';
+  const ended = await owner.request(4, 'tools/call', {
+    name: 'unity_router_workspace_end', arguments: { leaseToken: token },
+  });
+  assert.equal(ended.result.isError, undefined);
+  assert.deepEqual(ended.result.structuredContent, { token, project: 'A', state: 'RELEASED' });
+  assert.equal(core.workspaceRecords.has(token), false);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 0);
+});
+
+test('single-seat mutation is cancelled before child startup if the Editor closes while queued', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let audits = 0;
+  const exactEditor = { pid: 777, projectPath: harness.config.projects[0].path };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => ({
+      ok: true,
+      findings: [],
+      editors: audits++ === 0 ? [exactEditor] : [],
+    }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'editor-closes-before-child' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const result = await client.request(2, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'must-not-start-child' },
+  });
+  assert.equal(result.result.structuredContent.code, 'PROJECT_EDITOR_INACTIVE');
+  assert.equal(result.result.structuredContent.routerOperationState, 'CANCELLED');
+  assert.equal(core.children.size, 0);
+  const events = await readFile(harness.stateFile, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  });
+  assert(!events.includes('must-not-start-child'));
+  assert(!events.includes('"kind":"mutation"'));
+});
+
+test('single-seat mutation rechecks the exact Editor after child startup and before dispatch', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let audits = 0;
+  const exactEditor = { pid: 778, projectPath: harness.config.projects[0].path };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => ({
+      ok: true,
+      findings: [],
+      editors: audits++ < 3 ? [exactEditor] : [],
+    }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'editor-closes-before-dispatch' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const result = await client.request(2, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'must-not-dispatch' },
+  });
+  assert.equal(result.result.structuredContent.code, 'PROJECT_EDITOR_INACTIVE');
+  assert.equal(result.result.structuredContent.routerOperationState, 'CANCELLED');
+  const events = await readFile(harness.stateFile, 'utf8');
+  assert(events.includes('"kind":"spawn"'));
+  assert(!events.includes('must-not-dispatch'));
+});
+
+test('single-seat retry cannot auto-restart a child after its audited dispatch window', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const exactEditor = { pid: 779, projectPath: harness.config.projects[0].path };
+  let core;
+  let auditsWithChild = 0;
+  let childStoppedAfterAudit = false;
+  const coreOptions = {
+    config: harness.config,
+    journal,
+    editorLifecycle: fakeEditorLifecycle(harness.config),
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async ({ childPids }) => {
+      if (childStoppedAfterAudit) {
+        return { ok: true, findings: [], editors: [] };
+      }
+      if (childPids.length > 0) {
+        auditsWithChild += 1;
+        if (auditsWithChild === 2) {
+          const child = [...core.children.values()][0];
+          await child.stop('tool-retry');
+          childStoppedAfterAudit = true;
+        }
+      }
+      return { ok: true, findings: [], editors: [exactEditor] };
+    },
+    toolRefreshIntervalMs: 0,
+  };
+  core = new BrokerCore(coreOptions);
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'audited-retry-gap' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const result = await client.request(2, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'must-not-auto-restart-after-audit' },
+  });
+  assert.equal(childStoppedAfterAudit, true);
+  assert.equal(result.result.structuredContent.code, 'PROJECT_EDITOR_INACTIVE');
+  assert.equal(result.result.structuredContent.routerOperationState, 'CANCELLED');
+  const events = await readFile(harness.stateFile, 'utf8');
+  assert(!events.includes('must-not-auto-restart-after-audit'));
+});
+
 test('an attached client cannot trigger requests or background discovery before initialized notification', async (t) => {
   const harness = await fixture(t);
   const journal = await OperationJournal.open(harness.config.broker.journalFile);
@@ -195,6 +864,106 @@ test('an attached client cannot trigger requests or background discovery before 
   });
   await core.handle('phase-client', { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} });
   assert(messages.find((message) => message.id === 3)?.result?.tools?.some((tool) => tool.name === 'editor_status'));
+});
+
+test('cancellation received while lifecycle recovery is pending cannot overtake request registration', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const recoveryGate = deferred();
+  const editorLifecycle = {
+    ...fakeEditorLifecycle(harness.config),
+    ready: () => recoveryGate.promise,
+  };
+  const messages = [];
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const connection = core.attach({
+    clientId: 'early-cancel-client',
+    sessionNonce: 'early-cancel-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    send: (message) => messages.push(message),
+  });
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+  });
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+
+  const pending = core.handle(connection.id, {
+    jsonrpc: '2.0', id: 7002, method: 'resources/list', params: {},
+  });
+  await waitUntil(() => connection.incomingRequests.size === 1);
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', method: 'notifications/cancelled',
+    params: { requestId: 7002, reason: 'cancel during recovery' },
+  });
+  recoveryGate.resolve();
+  await pending;
+
+  assert.equal(messages.find((message) => message.id === 7002)?.error?.code, -32800);
+  assert.equal(connection.incomingRequests.size, 0);
+  assert.equal(connection.earlyCancellations.size, 0);
+  assert.equal(core.children.size, 0);
+});
+
+test('disconnect during lifecycle recovery cannot execute a stale admin request', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const recoveryGate = deferred();
+  const editorLifecycle = {
+    ...fakeEditorLifecycle(harness.config),
+    ready: () => recoveryGate.promise,
+  };
+  const messages = [];
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const connection = core.attach({
+    clientId: 'recovery-disconnect-admin',
+    sessionNonce: 'recovery-disconnect-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    isAdmin: true,
+    send: (message) => messages.push(message),
+  });
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+  });
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+
+  const pending = core.handle(connection.id, {
+    jsonrpc: '2.0', id: 7003, method: 'tools/call',
+    params: { name: 'unity_router_editor_use', arguments: { project: 'A' } },
+  });
+  await waitUntil(() => connection.incomingRequests.size === 1);
+  core.detach(connection.id);
+  recoveryGate.resolve();
+  await pending;
+
+  assert.equal(editorLifecycle.calls.length, 0);
+  assert.equal(messages.some((message) => message.id === 7003), false);
+  assert.equal(core.connections.has(connection.id), false);
+  assert.equal(connection.incomingRequests.size, 0);
 });
 
 test('project access denial keeps native diagnostics alive and never spawns or dispatches Unity', async (t) => {

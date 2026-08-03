@@ -1,13 +1,15 @@
 # Zamgune Unity Pipeline Compatibility
 
-Version `0.3.0` is an Editor-only companion to Unity's official CLI and `com.unity.pipeline`.
+Version `0.4.0` is an Editor-only companion to Unity's official CLI and `com.unity.pipeline`.
 It keeps the InputAction-name based timed-play workflow from legacy `play_unity_game` and captures
 the final composed Play Mode Game View without retaining the old custom MCP server. It also
 normalizes Pipeline's persisted JSON-string `recompile_status` and `test_status` responses for
 deterministic router polling. Its `recompile` replacement delegates to official behavior by default
 and adds an explicit source-neutral `force=true` lifecycle-canary path. Its `test_status`
 replacement closes the exact Pipeline 0.4 / Unity CLI beta.3 object-contract mismatch without
-replacing the official `run_tests` implementation or input schema.
+replacing the official `run_tests` implementation or input schema. It also exposes a typed,
+fail-closed handoff contract so a single licensed Editor seat can move between projects without
+process signals, automatic saves, or automatic discards.
 
 ## Requirements
 
@@ -25,6 +27,31 @@ The repository still contains UnityCodeMCPServer `0.7.0` as rollback source, but
 not installed or required by this compatibility package.
 
 ## Commands
+
+### `zamgune_handoff_status` and `zamgune_editor_close`
+
+`zamgune_handoff_status` returns the canonical project path, current Editor PID, compile/import and
+Play Mode state, every open scene with dirty/untitled flags, current Prefab Stage state, `canClose`,
+and machine-readable `blockers`. Batch mode, compiling/updating, Play Mode or a transition, any
+dirty or untitled scene, and any open Prefab Stage all block handoff.
+
+`zamgune_editor_close` requires the exact `expectedProjectPath`, `expectedPid`, and a non-empty
+`transitionId`. It rechecks those values and all handoff blockers, reserves the transition ID, then
+schedules one `File/Close` menu invocation after a 750 ms response-delivery window. The delayed
+callback repeats the complete safety and identity check. Repeating the same transition is
+idempotent; a different transition is blocked while the first is pending. The command never saves,
+discards, stops Play Mode, calls `EditorApplication.Exit`, or sends a process signal. Unity's own
+save confirmation remains the final defense for dirty asset editors that cannot be enumerated.
+
+Example typed call payload:
+
+```json
+{
+  "expectedProjectPath": "/absolute/path/to/project",
+  "expectedPid": 12345,
+  "transitionId": "handoff-20260803-001"
+}
+```
 
 ### `run_tests` and `test_status`
 
@@ -188,7 +215,8 @@ idle boundary, settings validation, bounded Phase-B event policy, fail-closed di
 and postconditions, in-memory property classification, path ancestry and moved-folder coverage,
 structured JSON input, deterministic asset resolution, simultaneous keyboard state, residual input
 reset, capture-height validation, and proportional capture scaling. A live Unity CLI integration
-pass is still required to prove cold-import bootstrap, domain-reload reconnection and status
+pass is still required to prove the typed handoff catalog and real `File/Close`, cold-import
+bootstrap, domain-reload reconnection and status
 replacement, Inspector enforcement, folder moves, Play Mode transitions, timed game advancement,
 focus behavior, and final-composited Game View capture.
 

@@ -54,6 +54,7 @@ function serializableConfig(config) {
       toolClasses: { ...config.recovery.toolClasses },
     },
     license: { ...config.license },
+    editorHandoff: { ...config.editorHandoff },
     broker: { ...config.broker },
     // Installed adapters are never allowed to auto-spawn a broker. launchd is
     // the sole broker owner; both Codex and Claude use the stable wrapper.

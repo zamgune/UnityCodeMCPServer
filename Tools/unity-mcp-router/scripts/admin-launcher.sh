@@ -87,6 +87,8 @@ TIMEOUT_ARGS=
 OPERATION_ACTION=
 OPERATION_ID=
 OPERATION_CONFIRM_RUNNING=0
+EDITOR_ACTION=
+EDITOR_SUBJECT=
 case "$COMMAND" in
   status|doctor|drain|resume)
     shift
@@ -130,6 +132,31 @@ case "$COMMAND" in
       exit 64
     }
     ;;
+  editor)
+    [ "$#" -eq 3 ] || { printf 'unity-mcp-admin: editor requires use PROJECT or status UUID\n' >&2; exit 64; }
+    EDITOR_ACTION=$2
+    EDITOR_SUBJECT=$3
+    case "$EDITOR_ACTION" in
+      use)
+        case "$EDITOR_SUBJECT" in
+          ''|-*|*/*|*[!A-Za-z0-9._-]*)
+            printf 'unity-mcp-admin: project alias contains rejected characters\n' >&2
+            exit 64
+            ;;
+        esac
+        ;;
+      status)
+        is_uuid "$EDITOR_SUBJECT" || {
+          printf 'unity-mcp-admin: editor operation id must be a canonical UUID\n' >&2
+          exit 64
+        }
+        ;;
+      *)
+        printf 'unity-mcp-admin: rejected editor action: %s\n' "$EDITOR_ACTION" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   *)
     printf 'unity-mcp-admin: rejected command: %s\n' "$COMMAND" >&2
     exit 64
@@ -148,6 +175,10 @@ case "$DEPLOYMENT_ID" in d-[A-Fa-f0-9]*) ;; *) printf 'unity-mcp-admin: invalid 
 RELEASE_DIR=$PREFIX/releases/$RELEASE_ID
 [ -d "$RELEASE_DIR" ] && [ ! -L "$RELEASE_DIR" ] || { printf 'unity-mcp-admin: release containment failed\n' >&2; exit 78; }
 cd -- "$RELEASE_DIR"
+if [ "$COMMAND" = editor ]; then
+  exec "$NODE_BIN" "$SELF_DIR/broker-admin.mjs" editor "$EDITOR_ACTION" "$EDITOR_SUBJECT" \
+    --runtime-root "$RELEASE_DIR" --config "$SELF_DIR/config.json"
+fi
 if [ "$COMMAND" = operation ]; then
   if [ "$OPERATION_ACTION" = status ]; then
     exec "$NODE_BIN" "$SELF_DIR/broker-admin.mjs" operation status "$OPERATION_ID" \

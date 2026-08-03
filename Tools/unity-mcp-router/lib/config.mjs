@@ -36,6 +36,12 @@ export const DEFAULTS = Object.freeze({
     safeReadRetries: 1,
   }),
   license: Object.freeze({ mode: 'single-seat', maxConcurrentEditors: 1 }),
+  editorHandoff: Object.freeze({
+    mode: 'manual-close',
+    pollIntervalMs: 500,
+    editorExitTimeoutSec: 180,
+    startupTimeoutSec: 900,
+  }),
   broker: Object.freeze({ childIdleMin: 15, processAuditEnforcement: 'enforce' }),
 });
 
@@ -601,6 +607,39 @@ export function normalizeConfig(
   if (maxConcurrentEditors > 2) {
     throw new ConfigError('license.maxConcurrentEditors must not exceed 2');
   }
+  const editorHandoff = raw.editorHandoff ?? {};
+  const editorHandoffMode = Object.prototype.hasOwnProperty.call(editorHandoff, 'mode')
+    ? editorHandoff.mode
+    : (licenseMode === 'single-seat' ? DEFAULTS.editorHandoff.mode : 'disabled');
+  if (!['disabled', 'manual-close', 'typed-auto-close'].includes(editorHandoffMode)) {
+    throw new ConfigError(
+      'editorHandoff.mode must be "disabled", "manual-close", or "typed-auto-close"',
+    );
+  }
+  if (editorHandoffMode !== 'disabled' &&
+      (licenseMode !== 'single-seat' || maxConcurrentEditors !== 1)) {
+    throw new ConfigError(
+      'Editor handoff requires single-seat mode with license.maxConcurrentEditors = 1',
+    );
+  }
+  const normalizedEditorHandoff = Object.freeze({
+    mode: editorHandoffMode,
+    pollIntervalMs: asInteger(
+      editorHandoff.pollIntervalMs ?? DEFAULTS.editorHandoff.pollIntervalMs,
+      'editorHandoff.pollIntervalMs',
+      { minimum: 100 },
+    ),
+    editorExitTimeoutSec: asFiniteNumber(
+      editorHandoff.editorExitTimeoutSec ?? DEFAULTS.editorHandoff.editorExitTimeoutSec,
+      'editorHandoff.editorExitTimeoutSec',
+      { minimum: 10 },
+    ),
+    startupTimeoutSec: asFiniteNumber(
+      editorHandoff.startupTimeoutSec ?? DEFAULTS.editorHandoff.startupTimeoutSec,
+      'editorHandoff.startupTimeoutSec',
+      { minimum: 30 },
+    ),
+  });
   const broker = raw.broker ?? {};
   let socketPath = path.resolve(cwd, expandHome(
     broker.socketPath ?? path.join(homeDir, '.unity-mcp-router', 'run', 'broker-v2.sock'),
@@ -671,6 +710,7 @@ export function normalizeConfig(
       toolClasses: Object.freeze(toolClasses),
     }),
     license: Object.freeze({ mode: licenseMode, maxConcurrentEditors }),
+    editorHandoff: normalizedEditorHandoff,
     broker: Object.freeze({
       socketPath,
       journalFile,
@@ -774,6 +814,7 @@ export function configFingerprint(config) {
     queue: config.queue,
     recovery: config.recovery,
     license: config.license,
+    editorHandoff: config.editorHandoff,
     broker: config.broker,
     startupTimeoutSec: config.startupTimeoutSec,
     toolTimeoutSec: config.toolTimeoutSec,

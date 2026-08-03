@@ -236,6 +236,7 @@ lib/broker-core.mjs
 lib/build-info.mjs
 lib/cli-version.mjs
 lib/config.mjs
+lib/editor-lifecycle.mjs
 lib/editor-registry.mjs
 lib/failure-classifier.mjs
 lib/lease-manager.mjs

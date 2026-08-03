@@ -26,10 +26,16 @@
       "path": "/Volumes/WD_1TB/ForkDefault/DigitalPet/DigitalPet"
     }
   ],
-  "_note": "All five validated projects use an audited embedded compatibility package snapshot. Keep each embedded tree, Pipeline version, and lock stanza in sync.",
+  "_note": "For manual-close, keep each project's embedded compatibility snapshot, Pipeline version, and lock stanza internally compatible; the five snapshots need not match. Synchronize all five to the same approved handoff-capable version only before typed-auto-close rollout.",
   "license": {
     "mode": "single-seat",
     "maxConcurrentEditors": 1
+  },
+  "editorHandoff": {
+    "mode": "manual-close",
+    "pollIntervalMs": 500,
+    "editorExitTimeoutSec": 180,
+    "startupTimeoutSec": 900
   },
   "broker": {
     "socketPath": "~/.unity-mcp-router/run/broker-v2.sock",

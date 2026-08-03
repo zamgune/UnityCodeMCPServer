@@ -46,8 +46,9 @@ Command options:
   --confirm-no-longer-running
                            Required to resolve a RUNNING operation after external verification
 
-With no command, smoke is used. A workspace guard owns and heartbeats its lease
-in one process; one-shot begin/heartbeat/end commands are intentionally absent.`;
+With no command, smoke is used. A workspace guard owns and heartbeats one Unity
+validation turn, waits for the tracked single-seat Editor handoff, then starts
+the guarded command. One-shot begin/heartbeat/end commands are intentionally absent.`;
 
 export class CliUsageError extends Error {
   constructor(message) {
@@ -486,6 +487,105 @@ async function runWorkspaceGuard(options, session, runtime) {
     message: `lease acquired for ${lease.project ?? options.project ?? 'default project'} (token ${token})`,
   });
 
+  const intervalMs = runtime.workspaceHeartbeatIntervalMs ??
+    Math.max(10_000, Math.min(60_000, Math.floor(ttlSec * 1000 / 3)));
+  const leaseCallTimeoutMs = Math.max(5_000, Math.min(30_000, intervalMs));
+  const releaseBeforeCommand = async (reason) => {
+    const end = await invokeTool(
+      session,
+      'unity_router_workspace_end',
+      { leaseToken: token },
+      { timeoutMs: leaseCallTimeoutMs },
+    ).catch((error) => ({ ok: false, output: error.message }));
+    if (!end.ok) {
+      writeLine(runtime.io.stderr,
+        `${reason}\nworkspace release failed for token ${token}: ${end.output}\n` +
+        `After verifying the Editor handoff is terminal, run: workspace resolve ${token} --confirm`);
+      return 1;
+    }
+    emitWorkspaceEvent(runtime.io, options.json, 'released', {
+      token,
+      project: lease.project ?? options.project ?? null,
+      message: `lease released before guarded command (token ${token})`,
+    });
+    writeLine(runtime.io.stderr, reason);
+    return 1;
+  };
+
+  let editorUse = lease.editorUse;
+  if (editorUse && typeof editorUse === 'object') {
+    const failedStates = new Set(['BLOCKED', 'CANCELLED', 'FAILED', 'UNKNOWN_OUTCOME']);
+    let lastState = null;
+    let nextHeartbeatAt = Date.now() + intervalMs;
+    let interruptedBy = null;
+    const activationSignals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+    const activationHandlers = new Map(activationSignals.map((signal) => [signal, () => {
+      interruptedBy ??= signal;
+    }]));
+    for (const [signal, handler] of activationHandlers) runtime.signalEmitter.on(signal, handler);
+    try {
+      for (;;) {
+        if (editorUse.state !== lastState) {
+          lastState = editorUse.state;
+          const manual = editorUse.state === 'WAITING_MANUAL_CLOSE'
+            ? ' Close the currently active Unity Editor normally; the target will open automatically.'
+            : '';
+          emitWorkspaceEvent(runtime.io, options.json, 'editor-use', {
+            operationId: editorUse.operationId ?? null,
+            state: editorUse.state,
+            blockers: editorUse.blockers ?? [],
+            message: `Editor handoff is ${editorUse.state}.${manual}`,
+          });
+        }
+        if (editorUse.state === 'COMPLETED') break;
+        if (failedStates.has(editorUse.state)) {
+          return releaseBeforeCommand(
+            `Editor handoff did not become ready (${editorUse.state}: ` +
+              `${(editorUse.blockers ?? []).join(', ') || 'no details'}). Guarded command was not started.`,
+          );
+        }
+        if (interruptedBy) {
+          return releaseBeforeCommand(
+            `Editor handoff wait was interrupted by ${interruptedBy}. Guarded command was not started.`,
+          );
+        }
+        if (Date.now() >= nextHeartbeatAt) {
+          const heartbeat = await invokeTool(
+            session,
+            'unity_router_workspace_heartbeat',
+            { leaseToken: token, ttlSec },
+            { timeoutMs: leaseCallTimeoutMs },
+          );
+          if (!heartbeat.ok) {
+            return releaseBeforeCommand(
+              `workspace heartbeat failed while waiting for Editor handoff: ${heartbeat.output}`,
+            );
+          }
+          nextHeartbeatAt = Date.now() + intervalMs;
+        }
+        if (typeof editorUse.operationId !== 'string' || editorUse.operationId.length === 0) {
+          return releaseBeforeCommand('Editor handoff did not provide a tracked operation id.');
+        }
+        await new Promise((resolve) => setTimeout(resolve, runtime.editorUsePollIntervalMs ?? 250));
+        const observed = await invokeTool(
+          session,
+          'unity_router_editor_use_status',
+          { operationId: editorUse.operationId },
+          { timeoutMs: leaseCallTimeoutMs },
+        );
+        if (!observed.ok) {
+          return releaseBeforeCommand(`Editor handoff status failed: ${observed.output}`);
+        }
+        editorUse = observed.result?.structuredContent;
+        if (!editorUse || typeof editorUse !== 'object') {
+          return releaseBeforeCommand('Editor handoff status returned no structured state.');
+        }
+      }
+    } finally {
+      for (const [signal, handler] of activationHandlers) runtime.signalEmitter.off(signal, handler);
+    }
+  }
+
   let child;
   try {
     child = runtime.spawnCommand(options.guardedCommand, options.guardedArgs, {
@@ -504,10 +604,6 @@ async function runWorkspaceGuard(options, session, runtime) {
   let heartbeatFailure = null;
   let forceKillTimer = null;
   const spawnError = { current: null };
-  const intervalMs = runtime.workspaceHeartbeatIntervalMs ??
-    Math.max(10_000, Math.min(60_000, Math.floor(ttlSec * 1000 / 3)));
-  const leaseCallTimeoutMs = Math.max(5_000, Math.min(30_000, intervalMs));
-
   const terminateChild = () => {
     if (!child || child.exitCode != null || child.signalCode != null) return;
     try { child.kill('SIGTERM'); } catch { /* child already exited */ }
@@ -612,6 +708,7 @@ export async function executeCommand(options, session, runtime = {}) {
     signalEmitter: runtime.signalEmitter ?? process,
     env: runtime.env ?? process.env,
     workspaceHeartbeatIntervalMs: runtime.workspaceHeartbeatIntervalMs,
+    editorUsePollIntervalMs: runtime.editorUsePollIntervalMs,
   };
 
   if (options.command === 'help') {

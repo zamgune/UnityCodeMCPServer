@@ -211,7 +211,23 @@ export class UnityMcpChild {
   }
 
   async request(method, params, timeoutMs = this.toolTimeoutMs, context = {}) {
-    await this.start(context.protocolVersion, context.clientInfo, context);
+    if (context.requireAlreadyStarted === true) {
+      const ready = this.alive && (this.state === 'READY' || this.state === 'BUSY');
+      const protocolMatches = context.protocolVersion == null
+        || this.protocolVersion === context.protocolVersion;
+      if (!ready || !protocolMatches) {
+        return {
+          transportFailure: true,
+          dispatched: false,
+          error: {
+            code: -32070,
+            message: `unity mcp process for "${this.project.name}" is not ready for audited dispatch.`,
+          },
+        };
+      }
+    } else {
+      await this.start(context.protocolVersion, context.clientInfo, context);
+    }
     if (context.isCancelled?.()) {
       return {
         transportFailure: true,

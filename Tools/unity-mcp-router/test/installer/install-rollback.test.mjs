@@ -521,7 +521,14 @@ test('staged installs are immutable, allowlisted, atomic, backed up, and roll ba
   assert(installedPaths.includes('SOURCE_SHA256SUMS'));
   assert.equal(statSync(path.join(releaseDir, 'broker-daemon.mjs')).mode & 0o222, 0);
   assert.match(JSON.parse(readFileSync(path.join(releaseDir, 'release.json'), 'utf8')).buildId, /^sha256:[a-f0-9]{64}$/);
-  assert.equal(JSON.parse(readFileSync(path.join(firstDir, 'config.json'), 'utf8')).brokerMode, 'connect-only');
+  const installedConfig = JSON.parse(readFileSync(path.join(firstDir, 'config.json'), 'utf8'));
+  assert.equal(installedConfig.brokerMode, 'connect-only');
+  assert.deepEqual(installedConfig.editorHandoff, {
+    mode: 'manual-close',
+    pollIntervalMs: 500,
+    editorExitTimeoutSec: 180,
+    startupTimeoutSec: 900,
+  });
   assert.match(readFileSync(path.join(f.prefix, 'bin', 'unity-mcp-adapter'), 'utf8'), /adapter-launcher\.sh/);
   assert.equal(existsSync(path.join(firstDir, 'release')), false);
   assert.match(readFileSync(path.join(firstDir, 'launch-agent.plist'), 'utf8'), /current\/broker-launcher\.sh/);

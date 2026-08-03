@@ -105,7 +105,7 @@ test('same project, same PID and seat overflow are blocked fail-closed', () => {
 });
 
 test('an exact duplicate registration is idempotent but identity-protected operations are strict', () => {
-  const registry = new EditorRegistry({ autoSweep: false });
+  const registry = new EditorRegistry({ autoSweep: false, now: () => 5_000 });
   const editor = registration('idempotent', 401);
   const first = registry.register(editor);
   const second = registry.register(editor);

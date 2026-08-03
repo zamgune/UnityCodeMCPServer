@@ -120,6 +120,35 @@ test('reports each child process lifecycle once and distinguishes expected stop'
   assert.equal(events[1].processGeneration, 2);
 });
 
+test('audited dispatch never auto-restarts a child that stopped after the audit', async (t) => {
+  let spawnGates = 0;
+  const child = new UnityMcpChild({
+    project: { id: 'audited-dispatch', name: 'audited-dispatch', path: ROOT },
+    unityBin: process.execPath,
+    unityArgs: [FAKE_UNITY],
+    startupTimeoutMs: 3_000,
+    toolTimeoutMs: 3_000,
+    env: { ...process.env, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    beforeSpawn: async () => { spawnGates += 1; },
+  });
+  t.after(() => child.stop());
+
+  await child.start();
+  await child.stop('tool-retry');
+  const response = await child.request('tools/call', {
+    name: 'editor_status',
+    arguments: {},
+  }, 3_000, {
+    protocolVersion: '2025-06-18',
+    requireAlreadyStarted: true,
+  });
+
+  assert.equal(response.transportFailure, true);
+  assert.equal(response.dispatched, false);
+  assert.equal(spawnGates, 1);
+  assert.equal(child.snapshot().alive, false);
+});
+
 test('fails closed when the official child negotiates a different MCP revision', async (t) => {
   const child = new UnityMcpChild({
     project: { id: 'fake-protocol', name: 'fake-protocol', path: ROOT },

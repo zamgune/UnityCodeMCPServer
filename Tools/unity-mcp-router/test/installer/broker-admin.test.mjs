@@ -259,6 +259,40 @@ test('broker-admin forwards only the bounded operation status and confirmed-comp
   }
 });
 
+test('broker-admin forwards only bounded editor use and status shapes', async (t) => {
+  const { config, attaches, calls } = await toolCaptureFixture(t);
+  const cases = [
+    {
+      argv: ['editor', 'use', 'fixture'],
+      expected: {
+        name: 'unity_router_editor_use',
+        arguments: { project: 'fixture' },
+      },
+      action: 'use',
+    },
+    {
+      argv: ['editor', 'status', OPERATION_ID],
+      expected: {
+        name: 'unity_router_editor_use_status',
+        arguments: { operationId: OPERATION_ID },
+      },
+      action: 'status',
+    },
+  ];
+
+  for (const entry of cases) {
+    const result = await runAdmin([
+      ...entry.argv, '--runtime-root', ROOT, '--config', config,
+    ]);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const payload = JSON.parse(result.stdout.trim());
+    assert.equal(payload.command, 'editor');
+    assert.equal(payload.action, entry.action);
+  }
+  assert.deepEqual(calls, cases.map((entry) => entry.expected));
+  assert.equal(attaches.length, cases.length);
+});
+
 test('broker-admin rejects malformed UUIDs, broader resolutions, pass-through, and reordered operation argv', () => {
   const internal = ['--runtime-root', ROOT, '--config', '/not/read/for/rejected-argv.json'];
   const rejected = [
@@ -266,6 +300,11 @@ test('broker-admin rejects malformed UUIDs, broader resolutions, pass-through, a
     ['call', 'unity_router_operation_status', '{}', ...internal],
     ['restart', 'fixture', ...internal],
     ['workspace', 'resolve', 'lease-token', '--confirm', ...internal],
+    ['editor', ...internal],
+    ['editor', 'use', ...internal],
+    ['editor', 'status', 'op-1', ...internal],
+    ['editor', 'status', OPERATION_ID, '--timeout-sec', '5', ...internal],
+    ['editor', 'resolve', OPERATION_ID, ...internal],
     ['operation', ...internal],
     ['operation', 'status', 'op-1', ...internal],
     ['operation', 'status', '123e4567-e89b-12d3-a456-42661417400g', ...internal],
