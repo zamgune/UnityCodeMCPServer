@@ -103,6 +103,26 @@ test('target already ready completes without close, stop, or open side effects',
   assert(Object.isFrozen(stateChanges.at(-1)));
 });
 
+test('a domain not-found error is not mistaken for an unavailable lifecycle tool', async (t) => {
+  const calls = [];
+  const { lifecycle } = await fixture(t, {
+    processAudit: async () => ({ ok: true, editors: [TARGET_EDITOR] }),
+    callTool: async (_project, name) => {
+      calls.push(name);
+      const error = new Error('Tool dependency not found while reading Editor state');
+      error.code = 'EDITOR_LIFECYCLE_TOOL_ERROR';
+      throw error;
+    },
+  });
+
+  const queued = await lifecycle.ensureProject(PROJECT_B);
+  const failed = await waitForState(lifecycle, queued.operationId, EDITOR_HANDOFF_STATES.FAILED);
+
+  assert.deepEqual(failed.blockers, ['PIPELINE_READY_TIMEOUT']);
+  assert(calls.length > 0);
+  assert(calls.every((name) => name === 'zamgune_handoff_status'));
+});
+
 test('state callback observes immutable transitions and one terminal notification', async (t) => {
   const changes = [];
   const { lifecycle } = await fixture(t, {

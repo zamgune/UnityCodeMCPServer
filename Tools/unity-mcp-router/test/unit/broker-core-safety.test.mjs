@@ -418,6 +418,50 @@ test('single-seat process audit failure blocks child startup with a typed error'
   assert.equal(core.children.size, 0);
 });
 
+test('manual same-target handoff falls back when official MCP reports a missing typed tool as isError', async (t) => {
+  const harness = await fixture(t, {
+    license: { mode: 'single-seat', maxConcurrentEditors: 1 },
+  });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const exactEditor = { pid: 780, projectPath: harness.config.projects[0].path };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: {
+      ...process.env,
+      FAKE_UNITY_STATE_FILE: harness.stateFile,
+      FAKE_UNITY_VERSION: '1.0.0-beta.3',
+      FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE: '1',
+    },
+    processAuditor: async () => ({ ok: true, findings: [], editors: [exactEditor] }),
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const admin = attach(core, 'A', { clientId: 'manual-status-fallback-admin', isAdmin: true });
+  await admin.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const started = await admin.request(2, 'tools/call', {
+    name: 'unity_router_editor_use', arguments: { project: 'A' },
+  });
+  const operationId = started.result.structuredContent.operationId;
+  const completed = await waitUntil(() => {
+    const snapshot = core.editorLifecycle.status(operationId);
+    return snapshot?.state === 'COMPLETED' ? snapshot : null;
+  });
+
+  assert.equal(completed.target.project, 'A');
+  assert.equal(journal.get(operationId).state, 'COMPLETED');
+  const events = (await readFile(harness.stateFile, 'utf8'))
+    .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(events.filter((event) => event.kind === 'call-start' &&
+    event.name === 'zamgune_handoff_status').length, 1);
+  assert.equal(events.filter((event) => event.kind === 'call-start' &&
+    event.name === 'editor_status').length, 1);
+  assert.equal(events.some((event) => event.kind === 'mutation'), false);
+});
+
 test('floating validation turn preserves the legacy lease-only guard without Editor handoff', async (t) => {
   const harness = await fixture(t);
   const journal = await OperationJournal.open(harness.config.broker.journalFile);

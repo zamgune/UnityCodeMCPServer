@@ -416,6 +416,20 @@ async function handle(message) {
     toolResult(message.id, JSON.stringify(cancelled), cancelled);
     return;
   }
+  if (name === 'zamgune_handoff_status' && process.env.FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE === '1') {
+    record('call-end', { id: message.id, name, projectPath, unavailable: true });
+    result(message.id, {
+      content: [{ type: 'text', text: 'Tool not found: zamgune_handoff_status' }],
+      isError: true,
+    });
+    return;
+  }
+  if (name === 'editor_status' && process.env.FAKE_UNITY_HANDOFF_STATUS_UNAVAILABLE === '1') {
+    const status = { status: 'ready', projectPath, playMode: 'stopped' };
+    record('call-end', { id: message.id, name, projectPath, fallback: true });
+    toolResult(message.id, JSON.stringify(status), status);
+    return;
+  }
   if (name === 'editor_status' && args.failOnce && !stateContains('fail-once', args.failOnce)) {
     record('fail-once', { key: args.failOnce, name, projectPath });
     process.exit(41);

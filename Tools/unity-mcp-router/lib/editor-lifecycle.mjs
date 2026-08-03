@@ -31,6 +31,8 @@ const TERMINAL_STATES = new Set([
 const PARENT_METHOD = 'unity_router_editor_use';
 const OPEN_METHOD = 'unity_router_editor_open';
 const STATUS_TOOL = 'unity_router_editor_use_status';
+const HANDOFF_STATUS_TOOL = 'zamgune_handoff_status';
+const EDITOR_CLOSE_TOOL = 'zamgune_editor_close';
 
 export class EditorLifecycleError extends Error {
   constructor(code, message, details = undefined, options = undefined) {
@@ -214,11 +216,25 @@ function projectByPath(config, projectPath) {
   return config.projects?.find((project) => canonicalPath(project.path) === expected) ?? null;
 }
 
-function isUnavailableTool(error) {
+function regexEscape(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isUnavailableTool(error, expectedName) {
   const code = String(error?.code ?? '');
-  const message = String(error?.message ?? '').toLowerCase();
-  return code === '-32601' || code === 'METHOD_NOT_FOUND' || code === 'TOOL_NOT_FOUND' ||
-    message.includes('not found') || message.includes('unknown tool');
+  if (code === '-32601' || code === 'METHOD_NOT_FOUND' || code === 'TOOL_NOT_FOUND') return true;
+  if (typeof expectedName !== 'string' || expectedName.length === 0) return false;
+  const name = regexEscape(expectedName);
+  const quotedName = `["'\u0060]?${name}["'\u0060]?`;
+  const patterns = [
+    new RegExp(`^(?:error\\s*:\\s*)?(?:mcp\\s+)?tool\\s+not\\s+found\\s*:\\s*${quotedName}(?:\\s*[.!]|\\s*$)`, 'i'),
+    new RegExp(`^(?:error\\s*:\\s*)?unknown\\s+(?:mcp\\s+)?tool\\s*:?\\s*${quotedName}(?:\\s*[.!]|\\s*$)`, 'i'),
+    new RegExp(`^(?:error\\s*:\\s*)?no\\s+such\\s+(?:mcp\\s+)?tool\\s*:?\\s*${quotedName}(?:\\s*[.!]|\\s*$)`, 'i'),
+    new RegExp(`^(?:error\\s*:\\s*)?(?:mcp\\s+)?tool\\s+${quotedName}\\s+(?:was\\s+)?not\\s+found(?:\\s*[.!]|\\s*$)`, 'i'),
+  ];
+  return String(error?.message ?? '').split(/\r?\n/)
+    .map((line) => line.trim())
+    .some((line) => patterns.some((pattern) => pattern.test(line)));
 }
 
 /**
@@ -540,14 +556,16 @@ export class EditorLifecycle {
     try {
       payload = toolPayload(await this.callTool(
         oldProject,
-        'zamgune_handoff_status',
+        HANDOFF_STATUS_TOOL,
         {},
         this.options.statusTimeoutMs,
       ));
       this.#assertOpen();
     } catch (error) {
       await this.#finish(job, EDITOR_HANDOFF_STATES.BLOCKED, [
-        isUnavailableTool(error) ? 'TYPED_HANDOFF_TOOL_UNAVAILABLE' : (error?.code ?? 'HANDOFF_STATUS_FAILED'),
+        isUnavailableTool(error, HANDOFF_STATUS_TOOL)
+          ? 'TYPED_HANDOFF_TOOL_UNAVAILABLE'
+          : (error?.code ?? 'HANDOFF_STATUS_FAILED'),
       ]);
       return;
     }
@@ -568,7 +586,7 @@ export class EditorLifecycle {
     job.closeDispatched = true;
     this.#setState(job, EDITOR_HANDOFF_STATES.QUIT_DISPATCHED, []);
     try {
-      const closePayload = toolPayload(await this.callTool(oldProject, 'zamgune_editor_close', {
+      const closePayload = toolPayload(await this.callTool(oldProject, EDITOR_CLOSE_TOOL, {
         expectedProjectPath: oldEditor.projectPath,
         expectedPid: oldEditor.pid,
         transitionId: job.transitionId,
@@ -741,9 +759,9 @@ export class EditorLifecycle {
 
   async #readTargetStatus(project) {
     try {
-      return toolPayload(await this.callTool(project, 'zamgune_handoff_status', {}, this.options.statusTimeoutMs));
+      return toolPayload(await this.callTool(project, HANDOFF_STATUS_TOOL, {}, this.options.statusTimeoutMs));
     } catch (error) {
-      if (!isUnavailableTool(error)) throw error;
+      if (!isUnavailableTool(error, HANDOFF_STATUS_TOOL)) throw error;
       return toolPayload(await this.callTool(project, 'editor_status', {}, this.options.statusTimeoutMs));
     }
   }

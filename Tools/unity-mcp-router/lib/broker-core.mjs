@@ -48,6 +48,17 @@ function responseResult(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
 
+function lifecycleToolErrorText(result) {
+  const parts = [];
+  for (const item of Array.isArray(result?.content) ? result.content : []) {
+    if (item?.type === 'text' && typeof item.text === 'string') parts.push(item.text);
+  }
+  if (typeof result?.structuredContent?.message === 'string') {
+    parts.push(result.structuredContent.message);
+  }
+  return parts.join('\n').trim().slice(0, 512);
+}
+
 function withOperationMetadata(result, operationId, state, extra = {}) {
   const base = result && typeof result === 'object' ? result : textResult(String(result ?? ''));
   const structured = base.structuredContent && typeof base.structuredContent === 'object'
@@ -2502,8 +2513,10 @@ export class BrokerCore {
       throw error;
     }
     if (response.result?.isError === true) {
-      const error = new Error(`Unity lifecycle tool ${name} returned an error result`);
+      const detail = lifecycleToolErrorText(response.result);
+      const error = new Error(detail || `Unity lifecycle tool ${name} returned an error result`);
       error.code = response.result?.structuredContent?.code ?? 'EDITOR_LIFECYCLE_TOOL_ERROR';
+      error.toolName = name;
       throw error;
     }
     return response.result;
