@@ -1,35 +1,46 @@
-# Copy to .codex/config.toml (gitignored) and adjust the absolute paths for this machine.
-#
-# Register the router, not `unity mcp` directly. `unity mcp` holds the Unity Cloud
-# token it read at startup; once that token expires the process returns 401 for the
-# rest of its life, and an MCP client cannot restart a server mid-session. The router
-# owns that child process, so it can refresh the credential, restart it, and retry
-# the call transparently.
-#
-# Requires Tools/unity-mcp-router/unity-mcp-router.config.json (copy the .example).
+# Copy to .codex/config.toml (gitignored) and replace <account> with the local macOS account.
+# Install the versioned broker first; do not point clients at the source tree or raw `unity mcp`.
 
 [mcp_servers.unity]
-command = "node"
-args = [
-  "/Volumes/WD_1TB/ForkDefault/UnityCodeMCPServer/Tools/unity-mcp-router/unity-mcp-router.mjs",
-  "--default",
-  "UnityCodeMCPServer",
-]
+command = "/Users/<account>/.unity-mcp-router/bin/unity-mcp-adapter"
+args = ["--default", "UnityCodeMCPServer"]
 startup_timeout_sec = 90
-tool_timeout_sec = 300
+tool_timeout_sec = 310
 
-# Never let two MCP processes attach to the same Editor.
-[mcp_servers.unity_codemcp]
-enabled = false
+# Headless canaries may auto-approve only this explicit safe-read set.
+# Mutating Unity tools remain approval-gated.
+[mcp_servers.unity.tools.editor_status]
+approval_mode = "approve"
 
-[mcp_servers.unity_slashnclaim]
-enabled = false
+[mcp_servers.unity.tools.get_console_logs]
+approval_mode = "approve"
 
-[mcp_servers.unity_ohmyfarm]
-enabled = false
+[mcp_servers.unity.tools.list_tests]
+approval_mode = "approve"
 
-[mcp_servers.unity_sheep_wolf]
-enabled = false
+[mcp_servers.unity.tools.test_status]
+approval_mode = "approve"
 
-[mcp_servers.unity_pajiready]
-enabled = false
+[mcp_servers.unity.tools.build_status]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.switch_build_target_status]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.recompile_status]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.package_status]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.list_open_scenes]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.unity_router_status]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.unity_router_doctor]
+approval_mode = "approve"
+
+[mcp_servers.unity.tools.unity_router_operation_status]
+approval_mode = "approve"

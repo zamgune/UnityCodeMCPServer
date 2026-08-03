@@ -1,15 +1,15 @@
 {
   "name": "com.zamgune.unity-pipeline-compat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "Zamgune Unity Pipeline Compatibility",
-  "description": "Editor-only commands that complement the official Unity CLI and Pipeline with deterministic InputAction timed play and final-composited Game View capture.",
+  "description": "Editor-only commands that complement the official Unity CLI and Pipeline with deterministic timed play, final-composited Game View capture, structured reload and test status, and an opt-in source-neutral force-recompile canary.",
   "unity": "6000.0",
   "author": {
     "name": "zamgune",
     "url": "https://github.com/zamgune/UnityCodeMCPServer"
   },
   "dependencies": {
-    "com.unity.pipeline": "0.3.1-exp.1",
+    "com.unity.pipeline": "0.4.0-exp.1",
     "com.unity.inputsystem": "1.19.0"
   },
   "keywords": [

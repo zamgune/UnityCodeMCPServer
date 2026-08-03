@@ -3,6 +3,7 @@
   "rootNamespace": "Zamgune.UnityPipelineCompat",
   "references": [
     "Unity.Pipeline",
+    "Unity.Pipeline.Editor",
     "Unity.InputSystem",
     "Unity.Nuget.Newtonsoft-Json"
   ],

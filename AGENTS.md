@@ -7,7 +7,7 @@ Agent guidance for contributors working in this repository.
 - The maintained/default integration is Unity's official CLI MCP plus `com.unity.pipeline`.
 - The compatibility package lives under `Packages/com.zamgune.unity-pipeline-compat`.
 - The executable source under `Assets/Plugins/UnityCodeMcpServer` and its Python stdio bridge are
-  rollback-only legacy code at published version `0.7.0`. Do not extend them unless the task
+  rollback-only legacy code frozen at embedded package version `0.7.0`. Do not extend them unless the task
   explicitly targets rollback maintenance.
 - Follow a closer `AGENTS.md` if one is added later. Explicit user instructions override this file.
 
@@ -20,26 +20,22 @@ Agent guidance for contributors working in this repository.
   validation but not invented runtime tests.
 - Use snake_case for new private Unity C# fields to match repository style.
 
-## Official Unity connection
+## Managed Unity connection
 
-Always target the repository's exact canonical path:
-
-```sh
-unity command --project-path "/absolute/path/to/UnityCodeMCPServer"
-unity mcp --project-path "/absolute/path/to/UnityCodeMCPServer"
-```
-
-For Codex, the active server must be equivalent to:
+Codex and Claude Code must connect through the installed stable adapter. The project-local default
+must be `UnityCodeMCPServer`:
 
 ```toml
-[mcp_servers.unity_codemcp]
-command = "/absolute/path/to/unity"
-args = ["mcp", "--project-path", "/absolute/path/to/UnityCodeMCPServer"]
-startup_timeout_sec = 60
-tool_timeout_sec = 300
+[mcp_servers.unity]
+command = "/Users/<account>/.unity-mcp-router/bin/unity-mcp-adapter"
+args = ["--default", "UnityCodeMCPServer"]
+startup_timeout_sec = 90
+tool_timeout_sec = 310
 ```
 
-Never omit `--project-path` when more than one Editor may be open.
+The macOS user LaunchAgent is the only broker owner. Do not start raw `unity mcp`, the source-tree
+router, or the legacy Python bridge beside it. Direct Unity CLI commands are limited to deliberate
+offline diagnosis or rollback work and must always include the exact `--project-path`.
 
 ## Official command workflow
 
@@ -52,8 +48,12 @@ Never omit `--project-path` when more than one Editor may be open.
    through `eval`.
 5. After C# edits, wait for compilation/domain reload, reconnect if needed, re-check
    `editor_status`, and fix compiler errors before testing.
-6. Run the narrowest `run_tests` filter first, then broaden only when risk requires it. Inspect the
-   structured failed and skipped counts instead of treating request completion as a pass.
+6. With Pipeline `0.4.0-exp.1`, never use synchronous `run_tests` or async `mode=all`. Run the
+   narrowest filter with an explicit `mode=editor` or `mode=playmode` and `async_tests=true`, then
+   poll `test_status` to a terminal state. Run the two modes separately when both are required.
+   Inspect the structured total, failed, skipped, inconclusive, and per-test results instead of
+   treating request completion or `status=completed` as a pass. Never redispatch a test mutation
+   whose response was lost; resolve its router operation only after independent terminal evidence.
 7. For timed InputAction play, use `zamgune_play_begin`, one or more structured
    `zamgune_play_step` calls, and `zamgune_play_end` in normal and failure cleanup.
 8. Use `zamgune_capture_game_view` when evidence must include overlay UI. Use Pipeline
@@ -63,7 +63,7 @@ Never omit `--project-path` when more than one Editor may be open.
 ## Package verification
 
 - Authoritative version: `Packages/com.zamgune.unity-pipeline-compat/package.json`.
-- Update `CHANGELOG.md` whenever that version changes.
+- Update `Packages/com.zamgune.unity-pipeline-compat/CHANGELOG.md` whenever that version changes.
 - Package Editor tests live under `Packages/com.zamgune.unity-pipeline-compat/Tests/Editor` and are
   exposed through the root manifest's `testables` entry.
 - A release check must include JSON parsing, `git diff --check`, command discovery, compatibility

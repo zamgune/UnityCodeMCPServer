@@ -1,0 +1,984 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import test from 'node:test';
+
+import { BrokerCore, isValidToolCatalog } from '../../lib/broker-core.mjs';
+import { normalizeConfig } from '../../lib/config.mjs';
+import { OperationJournal } from '../../lib/operation-journal.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const FAKE_UNITY = path.join(ROOT, 'test/fixtures/fake-unity.mjs');
+
+async function fixture(t, { projects = ['A'], processAuditEnforcement = 'enforce' } = {}) {
+  const root = await mkdtemp(path.join(tmpdir(), 'broker-core-safety-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entries = [];
+  for (const name of projects) {
+    const projectPath = path.join(root, name);
+    await mkdir(path.join(projectPath, 'Assets'), { recursive: true });
+    await mkdir(path.join(projectPath, 'ProjectSettings'));
+    entries.push({ name, path: projectPath });
+  }
+  const config = normalizeConfig({
+    schemaVersion: 2,
+    unityBin: process.execPath,
+    unityArgs: [FAKE_UNITY],
+    minimumCliVersion: '1.0.0-beta.3',
+    defaultProject: projects[0],
+    projects: entries,
+    reauthIntervalMin: 0,
+    queue: { maxPendingPerClient: 8, maxPendingPerProject: 16, maxPendingTotal: 32, maxHeavyInFlight: 1, deadlineSec: 3 },
+    license: { mode: 'floating', maxConcurrentEditors: 2 },
+    broker: {
+      socketPath: path.join(root, 'run', 'broker.sock'),
+      journalFile: path.join(root, 'operations.jsonl'),
+      workspaceLeaseFile: path.join(root, 'workspace.json'),
+      adminTokenFile: path.join(root, 'admin-token'),
+      processAuditEnforcement,
+      childIdleMin: 0,
+    },
+  }, { cwd: root, homeDir: root });
+  return { root, config, stateFile: path.join(root, 'events.jsonl') };
+}
+
+function attach(core, defaultProject, { clientId = `client-${defaultProject}`, isAdmin = false } = {}) {
+  const messages = [];
+  core.attach({
+    clientId,
+    sessionNonce: `session-${clientId}`,
+    defaultProject,
+    clientKind: 'unit-test',
+    isAdmin,
+    send: (message) => messages.push(message),
+  });
+  return {
+    clientId,
+    messages,
+    async request(id, method, params = {}) {
+      await core.handle(clientId, { jsonrpc: '2.0', id, method, params });
+      const index = messages.findIndex((message) => message.id === id);
+      assert(index >= 0, `missing response ${id}`);
+      const response = messages.splice(index, 1)[0];
+      if (method === 'initialize' && response.result) {
+        await core.handle(clientId, {
+          jsonrpc: '2.0',
+          method: 'notifications/initialized',
+          params: {},
+        });
+      }
+      return response;
+    },
+  };
+}
+
+const CLEAN_AUDIT = Object.freeze({ ok: true, findings: Object.freeze([]), editors: Object.freeze([]) });
+
+test('tool catalog shape requires unique non-empty names and object input schemas', () => {
+  const valid = { name: 'editor_status', description: 'status', inputSchema: { type: 'object' } };
+  assert.equal(isValidToolCatalog([]), true);
+  assert.equal(isValidToolCatalog([valid]), true);
+  assert.equal(isValidToolCatalog(undefined), false);
+  assert.equal(isValidToolCatalog([{}]), false);
+  assert.equal(isValidToolCatalog([{ ...valid, name: '' }]), false);
+  assert.equal(isValidToolCatalog([{ ...valid, inputSchema: null }]), false);
+  assert.equal(isValidToolCatalog([valid, { ...valid }]), false);
+  assert.equal(isValidToolCatalog([{ ...valid, outputSchema: [] }]), false);
+});
+
+function controllableProjectAccessAuditor(config, { allowed = false } = {}) {
+  const state = { allowed, assertCalls: 0, assertOptions: [], auditAllCalls: 0 };
+  const resultFor = (project) => ({
+    ok: state.allowed,
+    code: state.allowed ? 'PROJECT_ACCESS_OK' : 'PROJECT_ACCESS_DENIED',
+    project: project.name,
+    projectKey: project.key,
+    projectPath: project.path,
+    checkedAt: new Date().toISOString(),
+    likelyCause: state.allowed ? null : 'REMOVABLE_VOLUME_PRIVACY_DENIED',
+    remediation: state.allowed ? null : 'Grant Removable Volumes access.',
+    responsibleExecutable: process.execPath,
+    details: {},
+  });
+  return {
+    state,
+    snapshot() {
+      return {
+        ok: state.allowed,
+        responsibleExecutable: process.execPath,
+        timeoutMs: 3_000,
+        projects: config.projects.map((project) => ({ ...resultFor(project), stale: false })),
+      };
+    },
+    async auditAll() {
+      state.auditAllCalls += 1;
+      const projects = config.projects.map(resultFor);
+      return {
+        ok: projects.every((project) => project.ok),
+        responsibleExecutable: process.execPath,
+        timeoutMs: 3_000,
+        checkedAt: new Date().toISOString(),
+        projects,
+      };
+    },
+    async assertAccessible(project, options = {}) {
+      state.assertCalls += 1;
+      state.assertOptions.push(options);
+      const result = resultFor(project);
+      if (!result.ok) {
+        const error = new Error('project access denied');
+        error.code = result.code;
+        error.details = result;
+        throw error;
+      }
+      return result;
+    },
+    async close() {},
+  };
+}
+
+async function waitUntil(predicate, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting for condition');
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test('an attached client cannot trigger requests or background discovery before initialized notification', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const messages = [];
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 50,
+  });
+  t.after(() => core.close());
+  core.attach({
+    clientId: 'phase-client',
+    sessionNonce: 'phase-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    send: (message) => messages.push(message),
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await assert.rejects(() => readFile(harness.stateFile, 'utf8'), { code: 'ENOENT' });
+  await core.handle('phase-client', {
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'phase', version: '1' } },
+  });
+  await core.handle('phase-client', { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+  assert.equal(messages.find((message) => message.id === 2)?.error?.code, -32002);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await assert.rejects(() => readFile(harness.stateFile, 'utf8'), { code: 'ENOENT' });
+
+  await core.handle('phase-client', {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+  await core.handle('phase-client', { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} });
+  assert(messages.find((message) => message.id === 3)?.result?.tools?.some((tool) => tool.name === 'editor_status'));
+});
+
+test('project access denial keeps native diagnostics alive and never spawns or dispatches Unity', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const projectAccessAuditor = controllableProjectAccessAuditor(harness.config);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+    projectAccessAuditor,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const listed = await client.request(2, 'tools/list');
+  assert(listed.result.tools.some((tool) => tool.name === 'unity_router_status'));
+  assert(!listed.result.tools.some((tool) => tool.name === 'editor_status'));
+  const status = await client.request(3, 'tools/call', { name: 'unity_router_status', arguments: {} });
+  assert.equal(status.result.structuredContent.broker.executable, process.execPath);
+  assert.equal(status.result.structuredContent.projectAccess.ok, false);
+  const doctor = await client.request(4, 'tools/call', { name: 'unity_router_doctor', arguments: {} });
+  assert.equal(doctor.result.isError, true);
+  assert.equal(doctor.result.structuredContent.processAudit.ok, true);
+  assert.equal(doctor.result.structuredContent.projectAccess.ok, false);
+  assert.equal(doctor.result.structuredContent.findings[0].kind, 'project_access_failed');
+
+  const mutation = await client.request(5, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'must-not-dispatch' },
+  });
+  assert.equal(mutation.error?.data?.brokerCode, 'PROJECT_ACCESS_DENIED');
+  assert.equal(journal.list({ state: 'UNKNOWN_OUTCOME' }).length, 0);
+  assert.equal(core.children.get(harness.config.projects[0].key)?.snapshot().pid, null);
+  const events = await readFile(harness.stateFile, 'utf8');
+  assert(!events.includes('"kind":"spawn"'));
+  assert(!events.includes('must-not-dispatch'));
+});
+
+test('tool discovery recovers after the project access grant changes', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const projectAccessAuditor = controllableProjectAccessAuditor(harness.config);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+    projectAccessAuditor,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+  const blocked = await client.request(2, 'tools/list');
+  assert(!blocked.result.tools.some((tool) => tool.name === 'editor_status'));
+
+  projectAccessAuditor.state.allowed = true;
+  const recovered = await client.request(3, 'tools/list');
+  assert(recovered.result.tools.some((tool) => tool.name === 'editor_status'));
+  assert.equal(core.children.get(harness.config.projects[0].key)?.snapshot().ready, true);
+  assert(projectAccessAuditor.state.assertOptions.every((options) => options.force === true));
+});
+
+test('a known catalog stays invalidated when reload recovery exceeds its empty grace', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const toolsGateFile = path.join(harness.root, 'tools-ready');
+  await writeFile(toolsGateFile, 'ready');
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: {
+      ...process.env,
+      FAKE_UNITY_STATE_FILE: harness.stateFile,
+      FAKE_UNITY_VERSION: '1.0.0-beta.3',
+      FAKE_UNITY_TOOLS_GATE_FILE: toolsGateFile,
+      FAKE_UNITY_TOOLS_LIST_DELAY_MS: '100',
+    },
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+    toolCatalogRecoveryGraceMs: 500,
+    toolCatalogRecoveryPollMs: 5,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'catalog-recovery-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+  const initial = await client.request(2, 'tools/list');
+  assert(initial.result.tools.some((tool) => tool.name === 'editor_status'));
+
+  await rm(toolsGateFile);
+  const recompile = await client.request(3, 'tools/call', {
+    name: 'recompile',
+    arguments: { mode: 'sync_success', notifyToolsChanged: true, marker: 'catalog-recovery-timeout' },
+  });
+  const operationId = recompile.result?.structuredContent?.routerOperationId;
+  assert.equal(typeof operationId, 'string');
+  await core.acknowledgeResponse(client.clientId, { operationId, requestId: 3 });
+
+  const recoveryStartedAt = Date.now();
+  const recovering = await client.request(4, 'tools/list');
+  assert.equal(recovering.error?.data?.brokerCode, 'TOOL_CATALOG_RECOVERING');
+  assert(Date.now() - recoveryStartedAt < 750, 'catalog recovery must honor its hard grace deadline');
+  const projectKey = harness.config.projects[0].key;
+  assert.equal(core.toolRegistry.get(projectKey), null);
+  assert.equal(core.toolRegistry.hasKnownNonEmptyCatalog(projectKey), true);
+
+  await writeFile(toolsGateFile, 'ready');
+  await waitUntil(() => !core.toolDiscoveryInFlight.has(projectKey));
+  const recovered = await client.request(5, 'tools/list');
+  assert(recovered.result, JSON.stringify(recovered));
+  assert(recovered.result.tools.some((tool) => tool.name === 'editor_status'));
+});
+
+test('a first post-invalidation discovery error is fail-closed as catalog recovery', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const toolsErrorGateFile = path.join(harness.root, 'tools-error');
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: {
+      ...process.env,
+      FAKE_UNITY_STATE_FILE: harness.stateFile,
+      FAKE_UNITY_VERSION: '1.0.0-beta.3',
+      FAKE_UNITY_TOOLS_ERROR_GATE_FILE: toolsErrorGateFile,
+    },
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+    toolCatalogRecoveryGraceMs: 40,
+    toolCatalogRecoveryPollMs: 5,
+  });
+  t.after(() => core.close());
+  const clients = [
+    attach(core, 'A', { clientId: 'catalog-error-client-a' }),
+    attach(core, 'A', { clientId: 'catalog-error-client-b' }),
+  ];
+  for (let index = 0; index < clients.length; index += 1) {
+    await clients[index].request(index + 1, 'initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: `test-${index}`, version: '1' },
+    });
+  }
+  const initial = await clients[0].request(10, 'tools/list');
+  assert(initial.result.tools.some((tool) => tool.name === 'editor_status'));
+  await clients[1].request(11, 'tools/list');
+  for (const client of clients) client.messages.length = 0;
+
+  const recompile = await clients[0].request(12, 'tools/call', {
+    name: 'recompile',
+    arguments: { mode: 'sync_success', notifyToolsChanged: true, marker: 'catalog-error-recovery' },
+  });
+  const operationId = recompile.result?.structuredContent?.routerOperationId;
+  assert.equal(typeof operationId, 'string');
+  await core.acknowledgeResponse(clients[0].clientId, { operationId, requestId: 12 });
+  assert.deepEqual(clients.map((client) => client.messages.filter((message) =>
+    message.method === 'notifications/tools/list_changed').length), [1, 1]);
+
+  await writeFile(toolsErrorGateFile, 'error');
+  const recoveryStartedAt = Date.now();
+  const recovering = await clients[0].request(13, 'tools/list');
+  assert.equal(recovering.error?.data?.brokerCode, 'TOOL_CATALOG_RECOVERING');
+  assert(Date.now() - recoveryStartedAt < 250, 'catalog recovery must honor its hard grace deadline');
+  const projectKey = harness.config.projects[0].key;
+  assert.equal(core.toolRegistry.get(projectKey), null);
+  assert.equal(core.toolRegistry.hasKnownNonEmptyCatalog(projectKey), true);
+
+  await rm(toolsErrorGateFile);
+  const recovered = await clients[1].request(14, 'tools/list');
+  assert(recovered.result.tools.some((tool) => tool.name === 'editor_status'));
+  assert.deepEqual(clients.map((client) => client.messages.filter((message) =>
+    message.method === 'notifications/tools/list_changed').length), [1, 1]);
+});
+
+test('a malformed downstream tools/list is an explicit error instead of an empty catalog', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: {
+      ...process.env,
+      FAKE_UNITY_STATE_FILE: harness.stateFile,
+      FAKE_UNITY_VERSION: '1.0.0-beta.3',
+      FAKE_UNITY_MALFORMED_TOOLS_ONCE: 'entry',
+    },
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'malformed-catalog-client' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const malformed = await client.request(2, 'tools/list');
+  assert.equal(malformed.error?.data?.brokerCode, 'INVALID_TOOL_CATALOG');
+  assert.equal(core.toolRegistry.get(harness.config.projects[0].key), null);
+
+  const recovered = await client.request(3, 'tools/list');
+  assert(recovered.result.tools.some((tool) => tool.name === 'editor_status'));
+});
+
+test('enforced process audit blocks a bypass before dispatch and recovers after it clears', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let unsafe = true;
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => unsafe
+      ? {
+          ok: false,
+          findings: [{ severity: 'error', kind: 'direct_unmanaged_unity_mcp', pid: 991, projectPath: harness.config.projects[0].path }],
+          editors: [],
+        }
+      : CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+  const blocked = await client.request(2, 'tools/call', { name: 'mutate_once', arguments: { marker: 'blocked' } });
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+
+  unsafe = false;
+  core.auditCache = null;
+  const allowed = await client.request(3, 'tools/call', { name: 'mutate_once', arguments: { marker: 'allowed' } });
+  assert.equal(allowed.result?.isError, false);
+});
+
+test('concurrent forced process audits coalesce one fresh follow-up without overlap', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const gate = deferred();
+  let auditCalls = 0;
+  let activeAudits = 0;
+  let maxActiveAudits = 0;
+  const projectAccessAuditor = controllableProjectAccessAuditor(harness.config, { allowed: true });
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => {
+      auditCalls += 1;
+      activeAudits += 1;
+      maxActiveAudits = Math.max(maxActiveAudits, activeAudits);
+      try {
+        if (auditCalls === 1) return await gate.promise;
+        return CLEAN_AUDIT;
+      } finally {
+        activeAudits -= 1;
+      }
+    },
+    projectAccessAuditor,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const first = client.request(2, 'tools/call', { name: 'unity_router_doctor', arguments: {} });
+  await waitUntil(() => auditCalls === 1);
+  const second = client.request(3, 'tools/call', { name: 'unity_router_doctor', arguments: {} });
+  const third = client.request(4, 'tools/call', { name: 'unity_router_doctor', arguments: {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(auditCalls, 1);
+
+  gate.resolve(CLEAN_AUDIT);
+  const [firstResult, secondResult, thirdResult] = await Promise.all([first, second, third]);
+  assert.notEqual(firstResult.result?.isError, true);
+  assert.notEqual(secondResult.result?.isError, true);
+  assert.notEqual(thirdResult.result?.isError, true);
+  assert.equal(auditCalls, 2, 'forced callers during one generation must share one follow-up');
+  assert.equal(maxActiveAudits, 1, 'process-table audits must remain single-flight');
+
+  const next = await client.request(5, 'tools/call', { name: 'unity_router_doctor', arguments: {} });
+  assert.notEqual(next.result?.isError, true);
+  assert.equal(auditCalls, 3, 'a later forced doctor must run a fresh audit');
+});
+
+test('queued mutation gets a fresh forced audit after an older status snapshot', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const gate = deferred();
+  let auditCalls = 0;
+  let blockNextAudit = false;
+  let unsafe = false;
+  const unsafeAudit = {
+    ok: false,
+    findings: [{
+      severity: 'error',
+      kind: 'direct_unmanaged_unity_mcp',
+      pid: 99_998,
+      projectPath: harness.config.projects[0].path,
+    }],
+    editors: [],
+  };
+  const projectAccessAuditor = controllableProjectAccessAuditor(harness.config, { allowed: true });
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => {
+      auditCalls += 1;
+      const captured = unsafe ? unsafeAudit : CLEAN_AUDIT;
+      if (blockNextAudit) {
+        blockNextAudit = false;
+        await gate.promise;
+      }
+      return captured;
+    },
+    projectAccessAuditor,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+  await client.request(2, 'tools/list');
+
+  core.auditCache = null;
+  auditCalls = 0;
+  const blocker = client.request(3, 'tools/call', {
+    name: 'editor_status', arguments: { delayMs: 300, marker: 'freshness-blocker' },
+  });
+  await waitUntil(() => core.schedulers.get(harness.config.projects[0].key)?.snapshot().activeOperationId);
+  const mutation = client.request(4, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'must-not-run-on-stale-audit' },
+  });
+  await waitUntil(() => core.schedulers.get(harness.config.projects[0].key)?.snapshot().queued === 1);
+
+  blockNextAudit = true;
+  core.auditCache = null;
+  const status = client.request(5, 'tools/call', { name: 'unity_router_status', arguments: {} });
+  await waitUntil(() => auditCalls === 2);
+  unsafe = true;
+  await blocker;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(auditCalls, 2, 'dispatch must wait instead of reusing the older status snapshot');
+
+  gate.resolve();
+  const [blocked, statusResult] = await Promise.all([mutation, status]);
+  assert.notEqual(statusResult.result?.isError, true);
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(blocked.result?.structuredContent?.routerOperationState, 'CANCELLED');
+  assert.equal(auditCalls, 3, 'one fresh follow-up audit must observe the new conflict');
+  const events = await readFile(harness.stateFile, 'utf8');
+  assert(!events.includes('must-not-run-on-stale-audit'));
+});
+
+test('an unconfigured or path-unknown Editor blocks dispatch globally', async (t) => {
+  for (const kind of ['unconfigured_editor', 'editor_project_unknown']) {
+    const harness = await fixture(t);
+    const journal = await OperationJournal.open(harness.config.broker.journalFile);
+    const core = new BrokerCore({
+      config: harness.config,
+      journal,
+      env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+      processAuditor: async () => ({
+        ok: false,
+        findings: [{ severity: 'error', kind, pid: 993, projectPath: '/SymlinkOrUnknown' }],
+        editors: [],
+      }),
+    });
+    const client = attach(core, 'A', { clientId: `client-${kind}` });
+    await client.request(1, 'initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+    });
+    const blocked = await client.request(2, 'tools/call', {
+      name: 'mutate_once', arguments: { marker: `blocked-${kind}` },
+    });
+    assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+    await core.close();
+  }
+});
+
+test('a process conflict appearing while queued is re-audited and blocked before Unity dispatch', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let auditCalls = 0;
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => {
+      auditCalls += 1;
+      if (auditCalls === 1) return CLEAN_AUDIT;
+      return {
+        ok: false,
+        findings: [{
+          severity: 'error',
+          kind: 'direct_unmanaged_unity_mcp',
+          pid: 992,
+          projectPath: harness.config.projects[0].path,
+        }],
+        editors: [],
+      };
+    },
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'test', version: '1' },
+  });
+  const blocked = await client.request(2, 'tools/call', {
+    name: 'mutate_once',
+    arguments: { marker: 'dispatch-race-must-not-run' },
+  });
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(blocked.result?.structuredContent?.routerOperationState, 'CANCELLED');
+  const operationId = blocked.result?.structuredContent?.routerOperationId;
+  assert.equal(journal.get(operationId)?.state, 'CANCELLED');
+  const events = await readFile(harness.stateFile, 'utf8');
+  assert(!events.includes('dispatch-race-must-not-run'));
+});
+
+test('a completed mutation whose response is dropped before adapter ACK becomes fenced and is not replayed', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+
+  let droppedOperationId = null;
+  core.attach({
+    clientId: 'delivery-victim',
+    sessionNonce: 'delivery-victim-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    send: (message) => {
+      const metadata = message?.result?.structuredContent;
+      if (message.id === 2 && metadata?.routerDeliveryAckRequired === true) {
+        droppedOperationId = metadata.routerOperationId;
+        core.detach('delivery-victim');
+      }
+    },
+  });
+  await core.handle('delivery-victim', {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+  });
+  await core.handle('delivery-victim', {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+  await core.handle('delivery-victim', {
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: { name: 'mutate_once', arguments: { marker: 'delivery-gap-once' } },
+  });
+  assert.equal(typeof droppedOperationId, 'string');
+  await waitUntil(() => journal.get(droppedOperationId)?.state === 'UNKNOWN_OUTCOME');
+
+  const observer = attach(core, 'A', { clientId: 'delivery-observer' });
+  await observer.request(10, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+  const blocked = await observer.request(11, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'delivery-gap-retry' },
+  });
+  assert.equal(blocked.result?.structuredContent?.code, 'PROJECT_UNKNOWN_OUTCOME_FENCE');
+  const events = await readFile(harness.stateFile, 'utf8');
+  assert.equal(events.split('\n').filter((line) => line.includes('"kind":"mutation"')).length, 1);
+  assert(!events.includes('delivery-gap-retry'));
+});
+
+test('terminal async status waits for the trigger adapter ACK before finalizing', async (t) => {
+  const harness = await fixture(t, { processAuditEnforcement: 'report-only' });
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+
+  const trigger = attach(core, 'A', { clientId: 'async-trigger' });
+  const observer = attach(core, 'A', { clientId: 'async-observer' });
+  await Promise.all([
+    trigger.request(1, 'initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'trigger', version: '1' },
+    }),
+    observer.request(10, 'initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'observer', version: '1' },
+    }),
+  ]);
+
+  const started = await trigger.request(2, 'tools/call', {
+    name: 'build', arguments: { confirm: true, delayMs: 40, marker: 'terminal-before-ack' },
+  });
+  const operationId = started.result?.structuredContent?.routerOperationId;
+  assert.equal(started.result?.structuredContent?.routerOperationState, 'RUNNING');
+  assert.equal(typeof operationId, 'string');
+  await waitUntil(async () => {
+    try { return (await readFile(harness.stateFile, 'utf8')).includes('"kind":"async-complete"'); }
+    catch { return false; }
+  });
+
+  const terminal = await observer.request(11, 'tools/call', {
+    name: 'build_status', arguments: {},
+  });
+  assert.equal(terminal.result?.structuredContent?.status, 'completed');
+  assert.equal(journal.get(operationId)?.state, 'RUNNING');
+  const tracker = core.asyncByProject.get(harness.config.projects[0].key);
+  assert.equal(tracker?.terminalObserved, true);
+  assert.equal(tracker?.deliveryUncertain, true);
+  assert(core.leases.list().length > 0);
+
+  const acknowledged = await core.acknowledgeResponse(trigger.clientId, {
+    operationId,
+    requestId: 2,
+  });
+  assert.equal(acknowledged, true);
+  await waitUntil(() => journal.get(operationId)?.state === 'COMPLETED');
+  assert.equal(core.asyncByProject.size, 0);
+  assert.equal(core.leases.list().length, 0);
+  assert.equal(core.unknownByProject.size, 0);
+});
+
+test('workspace begin is fail-closed when a duplicate broker is detected', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let auditCalls = 0;
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => {
+      auditCalls += 1;
+      return {
+        ok: false,
+        findings: [{ severity: 'error', kind: 'duplicate_broker', pid: 99_991 }],
+        editors: [],
+      };
+    },
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+  const blocked = await client.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(core.workspaceRecords.size, 0);
+  assert(auditCalls >= 1);
+});
+
+test('workspace begin re-audits after waiting for the source-refresh lease', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let unsafe = false;
+  let auditCalls = 0;
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => {
+      auditCalls += 1;
+      return unsafe
+        ? {
+            ok: false,
+            findings: [{ severity: 'error', kind: 'duplicate_broker', pid: 99_992 }],
+            editors: [],
+          }
+        : CLEAN_AUDIT;
+    },
+  });
+  t.after(() => core.close());
+  const blockerIdentity = { ownerId: 'existing-writer', sessionNonce: 'existing-writer-session' };
+  const blocker = await core.leases.acquire('source-refresh', { ...blockerIdentity, ttlMs: 60_000 });
+  const client = attach(core, 'A', { clientId: 'waiting-writer' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const begin = client.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  await waitUntil(() => core.leases.listQueued({ key: 'source-refresh' }).length === 1);
+  assert.equal(auditCalls, 1);
+  unsafe = true;
+  core.leases.release(blocker, blockerIdentity);
+  const blocked = await begin;
+
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(auditCalls, 2);
+  assert.equal(core.workspaceRecords.size, 0);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 0);
+});
+
+test('workspace heartbeat re-audits and refuses to extend a lease after a bypass appears', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let unsafe = false;
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => unsafe
+      ? {
+          ok: false,
+          findings: [{ severity: 'error', kind: 'direct_unmanaged_unity_mcp', pid: 99_993 }],
+          editors: [],
+        }
+      : CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A', { clientId: 'heartbeat-writer' });
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+  const begun = await client.request(2, 'tools/call', {
+    name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 },
+  });
+  const token = begun.result?.structuredContent?.token;
+  assert.equal(typeof token, 'string');
+  const expiresAt = begun.result.structuredContent.expiresAt;
+
+  unsafe = true;
+  const blocked = await client.request(3, 'tools/call', {
+    name: 'unity_router_workspace_heartbeat', arguments: { leaseToken: token, ttlSec: 600 },
+  });
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(core.workspaceRecords.get(token)?.expiresAt, expiresAt);
+  assert.equal(core.leases.list({ key: 'source-refresh' }).length, 1);
+});
+
+test('workspace persistence attaches an in-flight lease to the reconnected owner session', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let releaseUpsert;
+  let enteredUpsert;
+  const upsertEntered = new Promise((resolve) => { enteredUpsert = resolve; });
+  const upsertGate = new Promise((resolve) => { releaseUpsert = resolve; });
+  const durableRecords = new Map();
+  const workspaceStore = {
+    create: (input) => ({ ...input, token: 'reconnected-workspace-token' }),
+    list: () => [],
+    get: (token) => durableRecords.get(token) ?? null,
+    health: () => ({ ok: true }),
+    async upsert(record) {
+      enteredUpsert();
+      await upsertGate;
+      durableRecords.set(record.token, structuredClone(record));
+      return record;
+    },
+    async remove(token) { durableRecords.delete(token); },
+    async close() {},
+  };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    workspaceStore,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+
+  const oldMessages = [];
+  core.attach({
+    clientId: 'reconnecting-writer',
+    sessionNonce: 'stable-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    send: (message) => oldMessages.push(message),
+  });
+  await core.handle('reconnecting-writer', {
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old', version: '1' } },
+  });
+  await core.handle('reconnecting-writer', {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+  const begin = core.handle('reconnecting-writer', {
+    jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 } },
+  });
+  await upsertEntered;
+
+  core.detach('reconnecting-writer');
+  const newMessages = [];
+  const reconnected = core.attach({
+    clientId: 'reconnecting-writer',
+    sessionNonce: 'stable-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    send: (message) => newMessages.push(message),
+  });
+  await core.handle('reconnecting-writer', {
+    jsonrpc: '2.0', id: 10, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'new', version: '1' } },
+  });
+  await core.handle('reconnecting-writer', {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+  releaseUpsert();
+  await begin;
+
+  assert.equal(durableRecords.size, 1);
+  assert.equal(reconnected.workspaceLeases.size, 1);
+  await core.handle('reconnecting-writer', {
+    jsonrpc: '2.0', id: 11, method: 'tools/call',
+    params: { name: 'unity_router_workspace_begin', arguments: { project: 'A', ttlSec: 60 } },
+  });
+  const recovered = newMessages.find((message) => message.id === 11);
+  assert.equal(recovered?.result?.structuredContent?.token, 'reconnected-workspace-token');
+});
+
+test('a RUNNING operation whose global leases cannot be restored creates a project recovery fence', async (t) => {
+  const harness = await fixture(t, { projects: ['A', 'B'], processAuditEnforcement: 'report-only' });
+  let journal = await OperationJournal.open(harness.config.broker.journalFile);
+  for (const project of harness.config.projects) {
+    const id = `build-${project.name}`;
+    await journal.recordReceived({
+      operationId: id,
+      project: project.name,
+      projectKey: project.key,
+      method: 'build',
+      payload: {},
+    });
+    await journal.markQueued(id);
+    await journal.markDispatching(id);
+    await journal.markRunning(id, 'build_status', { buildId: `fake-${project.name}` });
+  }
+  await journal.close();
+  journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'B');
+  await client.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+  const blocked = await client.request(2, 'tools/call', { name: 'mutate_once', arguments: {} });
+  assert.equal(blocked.result?.structuredContent?.code, 'PROJECT_RECOVERY_FENCE');
+  assert.equal(blocked.result?.structuredContent?.faults?.[0]?.code, 'ASYNC_LEASE_RESTORE_FAILED');
+});
+
+test('a v2 stable project identity mismatch never falls back to a recycled alias', async (t) => {
+  const harness = await fixture(t, { projects: ['A'], processAuditEnforcement: 'report-only' });
+  let journal = await OperationJournal.open(harness.config.broker.journalFile);
+  await journal.recordReceived({
+    operationId: 'old-checkout-operation',
+    project: 'A',
+    projectKey: 'dev:old:ino:checkout',
+    method: 'mutate_once',
+    payload: {},
+  });
+  await journal.markQueued('old-checkout-operation');
+  await journal.markDispatching('old-checkout-operation');
+  await journal.close();
+  journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+  const blocked = await client.request(2, 'tools/call', { name: 'mutate_once', arguments: {} });
+  assert.equal(blocked.result?.structuredContent?.code, 'PROJECT_RECOVERY_FENCE');
+  assert.equal(blocked.result?.structuredContent?.faults?.[0]?.code, 'UNKNOWN_PROJECT_NOT_CONFIGURED');
+});

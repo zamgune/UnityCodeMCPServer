@@ -1,6 +1,8 @@
 {
   "_readme": "Copy to unity-mcp-router.config.json and adjust the absolute paths for this machine. The copy is gitignored because paths differ per machine, exactly like .codex/config.toml.",
+  "schemaVersion": 2,
   "unityBin": "/Users/zamgune/.unity/bin/unity",
+  "minimumCliVersion": "1.0.0-beta.3",
   "defaultProject": "UnityCodeMCPServer",
   "projects": [
     {
@@ -18,11 +20,37 @@
     {
       "name": "SheepWolf",
       "path": "/Volumes/WD_1TB/PuzzleGameFoundations/Sheep-Wolf"
+    },
+    {
+      "name": "DigitalPet",
+      "path": "/Volumes/WD_1TB/ForkDefault/DigitalPet/DigitalPet"
     }
   ],
-  "_note": "UnityCodeMCPServer is the compat package's source project and embeds the package directly. The other three consume it over git at a pinned SHA.",
+  "_note": "All five validated projects use an audited embedded compatibility package snapshot. Keep each embedded tree, Pipeline version, and lock stanza in sync.",
+  "license": {
+    "mode": "single-seat",
+    "maxConcurrentEditors": 1
+  },
+  "broker": {
+    "socketPath": "~/.unity-mcp-router/run/broker-v2.sock",
+    "journalFile": "~/.unity-mcp-router/operations.jsonl",
+    "workspaceLeaseFile": "~/.unity-mcp-router/workspace-leases.json",
+    "adminTokenFile": "~/.unity-mcp-router/admin-token",
+    "processAuditEnforcement": "enforce",
+    "childIdleMin": 15
+  },
+  "queue": {
+    "maxPendingPerClient": 32,
+    "maxPendingPerProject": 128,
+    "maxPendingTotal": 512,
+    "maxHeavyInFlight": 1,
+    "deadlineSec": 300
+  },
+  "recovery": {
+    "safeReadRetries": 1,
+    "toolClasses": {}
+  },
   "toolTimeoutSec": 300,
   "startupTimeoutSec": 60,
-  "reauthIntervalMin": 20,
-  "maxRetries": 1
+  "reauthIntervalMin": 20
 }

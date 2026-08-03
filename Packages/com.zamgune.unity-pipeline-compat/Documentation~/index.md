@@ -1,4 +1,91 @@
-# Timed play compatibility commands
+# Unity Pipeline compatibility commands
+
+## Structured asynchronous test status
+
+Pipeline `0.4.0-exp.1` keeps the official `run_tests` input contract and writes asynchronous state
+to `Temp/pipeline_test_request.json` and `Temp/pipeline_test_status.json`, but its public
+`test_status` command serializes that state as a JSON string without `isRunning`. Unity CLI
+`1.0.0-beta.3` adds a hidden poll after `run_tests` and only returns the MCP tool result after it
+receives an object with `isRunning=false`. Without compatibility, a completed test run can therefore
+hold the CLI request until its ten-minute deadline.
+
+The compatibility discovery retains exactly one official `TestCommands.RunTests` method and
+replaces exactly one official `TestCommands.GetTestStatus` method. The replacement parses the
+official string into an object, preserves `status`, `summary`, `results`, and `message`, and forces
+`isRunning=false` only to release beta.3's transport poll. `status` remains authoritative: a broker
+must continue polling `running` or `in_progress` and stop only on a terminal status. When the
+Pipeline request marker exists, `running` takes precedence over an older completed status file;
+malformed, missing-field, or unknown status payloads return a terminal `error` object rather than
+wedging the CLI.
+
+Use `run_tests` only with an explicit `editor` or `playmode` mode and `async_tests=true`. Never
+retry a trigger whose delivery is uncertain; inspect `test_status` and the router operation journal
+first. Pipeline's status files do not contain a run ID, so direct clients outside the broker must
+not start overlapping runs.
+
+## Structured recompile status
+
+Pipeline `0.4.0-exp.1` persists recompile state in
+`Temp/pipeline_recompile_status.json`, but its public `recompile_status` command returns that JSON as
+a string. This package requires exactly one official `EditorPipelineManager` settings asset with
+`AutoStart=false`. On each main-process domain load, Phase A forces official Pipeline
+initialization, immediately stops its server, and installs a discovery that exposes none of the
+protected test or recompile triggers/status handlers. Phase B is driven by bounded editor events:
+domain reload and relevant asset/folder events
+from `AssetPostprocessor`, in-memory `EditorPipelineManager` property changes from
+`ObjectChangeEvents.changesPublished`, and `OnWillSaveAssets` as a secondary save-time path. It
+validates the settings gate, decorates public command discovery, validates the replacement, and only
+then starts the server. It removes exactly
+`Unity.Pipeline.Editor.Commands.RecompileCommand.Recompile` and `RecompileStatus`, and retains
+exactly one compatibility status command and one official trigger for each protected lifecycle.
+
+Cold initial import is retried without `EditorApplication.delayCall` polling. If the settings YAML
+is not indexed during the first Phase-B attempt, Pipeline remains stopped; importing the canonical
+settings path, any loadable `EditorPipelineManager` asset, or a previously discovered settings path
+triggers another bounded attempt.
+
+Path relevance includes exact matches and parent folders of the canonical or previously discovered
+manager asset. Imported or moved folders are searched for contained `EditorPipelineManager` assets;
+deleted and move-from parent paths are matched by ancestry even though those folders no longer
+exist. Inspector property events are resolved by changed instance and asset GUID, so an unsaved
+`AutoStart=true` change stops the server and disables all protected commands on the published
+object-change event.
+
+Pipeline `0.4.0-exp.1` has an unavoidable upstream first-import gap. Before the settings asset is
+indexed, its initializer applies the built-in `AutoStart=true` default. Phase A must force that
+initializer before it can call `StopServer`, so the official listener may be open for a brief,
+typically millisecond-scale but not timing-guaranteed, interval. The compatibility package does not
+claim to eliminate that interval. It guarantees that after Phase A returns the server is stopped
+and all protected test/recompile commands are disabled until Phase B succeeds.
+
+The compatibility handler returns `status`, `failed`, `errors`, and `isCompiling` as a structured
+object. It preserves Pipeline's compiler-error array. Every persisted `triggered`, `compiling`,
+`completed`, or `up_to_date` object must contain an exact boolean `failed` field and an `errors`
+array containing only strings. Missing, null, or wrongly typed fields return `status=error`; a
+persisted `idle` object is also rejected. Only a missing status file synthesizes the safe
+`idle`, `failed=false`, empty-errors response. `isCompiling` is derived only from persisted state and
+is true only for `compiling`; `triggered` represents pending intent, and the background handler never calls
+`EditorApplication`.
+
+The compatibility `recompile` handler preserves Pipeline's default behavior: `focus=false` and
+`force=false` delegate directly to the official command. The optional `force=true` path is intended
+only for explicit lifecycle canaries. It performs the official refresh first and, only when no
+compilation started, persists `triggered` before requesting
+`CompilationPipeline.RequestScriptCompilation(CleanBuildCache)`. This produces a source-neutral
+clean compilation that the MCP router can track through `recompile_status`. It never requests a
+second compilation when the official refresh already started one, never retries a rejected request,
+and never requests compilation if status persistence failed.
+
+Startup and discovery fail closed. If the settings asset is missing, duplicated, unloadable, or has
+`AutoStart=true`, or if the official method is missing, duplicated, renamed, claimed by another
+method, or any Phase-B operation throws, the server remains stopped, an Editor error is logged, and
+none of the protected commands is exposed. All unrelated Pipeline commands remain
+unchanged.
+
+This does not intercept the official `Pipeline/Start Server` menu action. A manual Start while the
+gate is invalid can start upstream Pipeline with status discovery still disabled until another
+relevant settings event occurs. Recovery should be performed by correcting the settings asset, not
+by using that menu action.
 
 ## Lifecycle
 

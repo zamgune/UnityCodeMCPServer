@@ -79,6 +79,7 @@ crashlytics-build.properties
 
 *.pyc
 .vscode/
+.DS_Store
 # Auto-installed agent skills; keep .github/workflows/ committed
 .github/skills/
 Dev/Python/.python-version
