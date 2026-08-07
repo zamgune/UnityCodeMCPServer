@@ -45,6 +45,19 @@ function responseError(id, code, message, data = undefined) {
   return { jsonrpc: '2.0', id, error: { code, message, ...(data === undefined ? {} : { data }) } };
 }
 
+// Audit findings name the exact processes the operator has to close, so the
+// blocked tools/list error repeats them instead of leaving the reason in the log.
+function describeAuditFindings(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) return 'no findings reported';
+  return findings.map((finding) => {
+    const parts = [finding?.kind ?? 'unknown_finding'];
+    const pids = finding?.pids ?? (finding?.pid == null ? [] : [finding.pid]);
+    if (pids.length > 0) parts.push(`pid ${pids.join(', ')}`);
+    if (finding?.projectPath) parts.push(finding.projectPath);
+    return parts.join(' ');
+  }).join('; ');
+}
+
 function responseResult(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
@@ -1411,11 +1424,21 @@ export class BrokerCore {
       throw new SchedulerError('Tool discovery cancelled during safety checks', { code: 'CANCELLED' });
     }
     if (unsafe) {
+      const findings = unsafe.structuredContent?.findings ?? [];
       this.logger.warn('Unity tool discovery blocked by system process audit', {
         project: this.projectName(project),
-        findings: unsafe.structuredContent?.findings,
+        findings,
       });
-      return [];
+      // An empty catalog reads as "Unity MCP is broken" on the client. Fail
+      // loudly with the findings so the operator can clear the actual conflict.
+      throw new SchedulerError(
+        `Unity tool discovery for ${this.projectName(project)} is blocked by the process audit: ` +
+          describeAuditFindings(findings),
+        {
+          code: unsafe.structuredContent?.code ?? 'SYSTEM_CONCURRENCY_UNSAFE',
+          details: { findings },
+        },
+      );
     }
     if (await this.#singleSeatInactiveProject(project)) return [];
     const cli = await this.auth.compatibility(this.config.minimumCliVersion);

@@ -421,7 +421,9 @@ test('single-seat child gate rejects error findings even if process audit ok is 
   });
 
   const listed = await client.request(2, 'tools/list');
-  assert(!listed.result.tools.some((tool) => tool.name === 'editor_status'));
+  assert.equal(listed.result, undefined);
+  assert.equal(listed.error.data.brokerCode, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(listed.error.data.details.findings[0].kind, 'duplicate_broker');
   assert.equal(core.children.size, 0);
 });
 
@@ -1241,6 +1243,44 @@ test('tool discovery recovers after the project access grant changes', async (t)
   assert(recovered.result.tools.some((tool) => tool.name === 'editor_status'));
   assert.equal(core.children.get(harness.config.projects[0].key)?.snapshot().ready, true);
   assert(projectAccessAuditor.state.assertOptions.every((options) => options.force === true));
+});
+
+test('a process-audit block is an explicit tools/list error instead of an empty catalog', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  let auditResult = {
+    ok: false,
+    editors: [],
+    findings: [{
+      severity: 'error',
+      kind: 'editor_seat_limit_exceeded',
+      editorCount: 2,
+      maxConcurrentEditors: 1,
+      pids: [25784, 30973],
+    }],
+  };
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => auditResult,
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const blocked = await client.request(2, 'tools/list');
+  assert.equal(blocked.result, undefined);
+  assert.equal(blocked.error.data.brokerCode, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(blocked.error.data.details.findings[0].kind, 'editor_seat_limit_exceeded');
+  assert.match(blocked.error.message, /editor_seat_limit_exceeded pid 25784, 30973/);
+
+  auditResult = CLEAN_AUDIT;
+  core.auditCache = null;
+  const recovered = await client.request(3, 'tools/list');
+  assert(recovered.result.tools.some((tool) => tool.name === 'editor_status'));
 });
 
 test('a known catalog stays invalidated when reload recovery exceeds its empty grace', async (t) => {
