@@ -1,8 +1,8 @@
 {
   "name": "com.zamgune.unity-pipeline-compat",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "displayName": "Zamgune Unity Pipeline Compatibility",
-  "description": "Editor-only commands that complement the official Unity CLI and Pipeline with deterministic timed play, final-composited Game View capture, structured reload and test status, an opt-in source-neutral force-recompile canary, and fail-closed single-seat Editor handoff.",
+  "description": "Editor-only commands that complement the official Unity CLI and Pipeline with deterministic timed play, final-composited Game View capture, structured reload and test status, Unity 6.5 build-environment diagnostics, an opt-in source-neutral force-recompile canary, and fail-closed single-seat Editor handoff.",
   "unity": "6000.0",
   "author": {
     "name": "zamgune",

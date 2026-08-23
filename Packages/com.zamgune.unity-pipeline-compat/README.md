@@ -1,6 +1,6 @@
 # Zamgune Unity Pipeline Compatibility
 
-Version `0.4.0` is an Editor-only companion to Unity's official CLI and `com.unity.pipeline`.
+Version `0.4.2` is an Editor-only companion to Unity's official CLI and `com.unity.pipeline`.
 It keeps the InputAction-name based timed-play workflow from legacy `play_unity_game` and captures
 the final composed Play Mode Game View without retaining the old custom MCP server. It also
 normalizes Pipeline's persisted JSON-string `recompile_status` and `test_status` responses for
@@ -27,6 +27,14 @@ The repository still contains UnityCodeMCPServer `0.7.0` as rollback source, but
 not installed or required by this compatibility package.
 
 ## Commands
+
+### `zamgune_build_environment_status`
+
+Returns Unity and project identity, Editor compile/import/Play readiness, active build target, installed
+target support, and the Unity 6000.5 Build Profile inventory without changing profiles or targets.
+Build Profile `EntityId` values are encoded as unsigned decimal strings so MCP clients do not lose
+precision in JavaScript. On Unity 6000.0 through 6000.4 the stable response remains available with
+`buildProfileApisAvailable=false`; the 6.5-only profile and installed-module arrays remain empty.
 
 ### `zamgune_handoff_status` and `zamgune_editor_close`
 
@@ -208,7 +216,7 @@ Package Editor tests live under `Tests/Editor`. Add the package name to the cons
 "testables": ["com.zamgune.unity-pipeline-compat"]
 ```
 
-The Editor tests cover command metadata, default trigger delegation, opt-in force behavior without
+The Editor tests cover build-environment schema and 64-bit ID encoding, command metadata, default trigger delegation, opt-in force behavior without
 actually requesting compilation, strict persisted recompile-state conversion, structured
 test-status conversion and beta.3 poll release, the no-file
 idle boundary, settings validation, bounded Phase-B event policy, fail-closed discovery invariants

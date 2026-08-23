@@ -13,7 +13,8 @@ function usage() {
     '       broker-admin.mjs editor use PROJECT --runtime-root DIR --config FILE\n' +
     '       broker-admin.mjs editor status UUID --runtime-root DIR --config FILE\n' +
     '       broker-admin.mjs operation status UUID --runtime-root DIR --config FILE\n' +
-    '       broker-admin.mjs operation resolve UUID confirmed_completed [--confirm-no-longer-running] --runtime-root DIR --config FILE\n',
+    '       broker-admin.mjs operation resolve UUID confirmed_completed [--confirm-no-longer-running] --runtime-root DIR --config FILE\n' +
+    '       broker-admin.mjs workspace resolve UUID --confirm --runtime-root DIR --config FILE\n',
   );
   process.exit(64);
 }
@@ -46,6 +47,17 @@ function parseArgs(argv) {
       editor_action: editorAction,
       ...(editorAction === 'use' ? { project: subject } : { operation_id: subject }),
       ...parseRuntimeArgs(argv.slice(3), { allowTimeout: false }),
+    };
+  }
+  if (command === 'workspace') {
+    const workspaceAction = argv[1];
+    const leaseToken = argv[2];
+    if (workspaceAction !== 'resolve' || !UUID.test(leaseToken ?? '') || argv[3] !== '--confirm') usage();
+    return {
+      command,
+      workspace_action: workspaceAction,
+      lease_token: leaseToken,
+      ...parseRuntimeArgs(argv.slice(4), { allowTimeout: false }),
     };
   }
   if (command !== 'operation') usage();
@@ -271,6 +283,9 @@ try {
       resolution: args.resolution,
       ...(args.confirm_no_longer_running ? { confirmNoLongerRunning: true } : {}),
     };
+  } else if (args.command === 'workspace' && args.workspace_action === 'resolve') {
+    tool = 'unity_router_workspace_resolve';
+    toolArguments = { leaseToken: args.lease_token, confirm: true };
   } else {
     tool = {
       status: 'unity_router_status',
@@ -290,8 +305,8 @@ try {
   write({
     ok,
     command: args.command,
-    ...((args.operation_action ?? args.editor_action)
-      ? { action: args.operation_action ?? args.editor_action }
+    ...((args.operation_action ?? args.editor_action ?? args.workspace_action)
+      ? { action: args.operation_action ?? args.editor_action ?? args.workspace_action }
       : {}),
     result: structured,
   });

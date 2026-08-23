@@ -24,8 +24,9 @@ flowchart LR
 - 각 프로젝트는 설치 시 `realpath`와 filesystem `dev/inode`로 식별해 immutable prepared config에 고정한다. 설치된 broker/adapter/admin은 시작할 때 외장 프로젝트 경로를 직접 조회하지 않는다. 같은 physical checkout의 alias는 하나로 합치고, 같은 checkout에 서로 다른 `unityBin/extraArgs` profile이 들어오면 시작을 거부한다.
 - 서로 다른 repository의 source 편집은 병행할 수 있지만 같은 repository의 동시 writer는 agent/Git coordination으로 금지한다. Unity import/recompile/test/build validation turn과 heavy 작업은 기본값에서 machine-wide로 하나씩만 허용한다.
 - mutation은 Unity에 전달된 뒤 timeout, 연결 단절 또는 취소가 발생해도 자동 재전송하지 않는다. 결과를 알 수 없으면 `UNKNOWN_OUTCOME`로 journal에 남기고 해당 프로젝트의 mutation을 차단한다.
+- Pipeline이 `Main thread operation timed out after ...ms`를 반환하면 HTTP 응답이 도착했더라도 Unity 내부 작업은 계속될 수 있다. broker는 이를 `UNITY_MAIN_THREAD_TIMEOUT` 사유의 durable `UNKNOWN_OUTCOME`로 기록하고, 재시작 후에도 machine-wide heavy slot을 보류해 모든 프로젝트의 새 import/recompile/test/build를 차단한다. 독립적으로 실제 작업 종료를 확인한 뒤에만 `confirmNoLongerRunning=true`로 해제한다.
 - Codex/Claude 연결 종료는 다른 client나 shared Unity child를 종료하지 않는다.
-- raw `unity mcp`, legacy adapter, 두 번째 broker, 동일 프로젝트의 중복 Editor, license capacity 초과 Editor는 process audit에서 검출하며 기본 설정은 dispatch를 차단한다.
+- raw `unity mcp`, legacy adapter, 두 번째 broker, 동일 프로젝트의 중복 Editor, license capacity 초과 Editor는 process audit에서 검출하며 기본 설정은 dispatch를 차단한다. Unity 6000.5.9f1의 알려진 다중 `bee_backend` 충돌에 대비해 고아 `bee_backend` 또는 서로 다른 Editor 세션에 속한 Bee 작업도 차단하되, 한 Editor 아래의 정상적인 복수 Bee 작업은 허용하고 프로세스를 자동 종료하지 않는다.
 
 ## 필수 조건
 
@@ -39,7 +40,7 @@ flowchart LR
    ```
 
 3. LaunchAgent가 사용하는 exact managed Node (`~/.unity-mcp-router/runtimes/<sha256>/node`)에 macOS의 이동식 볼륨 접근을 허용해야 한다. Node SHA가 바뀌면 실행 경로도 바뀌므로 새 경로를 다시 승인하고 `unity-mcp-router-admin doctor`를 통과시킨다. broker는 Unity child를 만들기 전에 별도 process에서 각 project의 `Assets`와 `ProjectSettings`, 설치 시 고정한 exact `dev/inode`를 최대 3초만 검사한다. 권한 팝업이나 볼륨 정지는 `PROJECT_ACCESS_PROBE_TIMEOUT`, 같은 경로의 교체·오마운트는 `PROJECT_IDENTITY_MISMATCH`로 fail-closed하며 broker 자체와 status/doctor는 계속 응답한다.
-4. 각 프로젝트에는 고정된 `com.unity.pipeline` 및 lock stanza와 호환되는 audited embedded compatibility snapshot이 설치되어 있어야 한다. `manual-close`는 Pipeline `editor_status` fallback을 지원하므로 5개 snapshot의 동일 버전 동기화가 선행조건은 아니다. 동일한 승인 handoff package로의 동기화는 `typed-auto-close`의 별도 gate다. single-seat handoff는 선택된 한 Editor만 해당 canonical 절대 경로로 열고 Unity CLI `--project-path` routing을 사용한다. `--instance`는 제거됐다. [Unity CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-reference), [Unity Pipeline package](https://docs.unity.com/en-us/unity-production-pipeline/local-tools-cli/unity-pipeline-package)
+4. 각 프로젝트에는 고정된 `com.unity.pipeline` 및 lock stanza와 호환되는 audited embedded compatibility snapshot이 설치되어 있어야 한다. `manual-close`는 stable `tools/list`에서 typed handoff 명령의 부재를 먼저 증명해 Unity Console을 오염시키는 호출 없이 Pipeline `editor_status`로 fallback하므로 5개 snapshot의 동일 버전 동기화가 선행조건은 아니다. 동일한 승인 handoff package로의 동기화는 `typed-auto-close`의 별도 gate다. single-seat handoff는 선택된 한 Editor만 해당 canonical 절대 경로로 열고 Unity CLI `--project-path` routing을 사용한다. `--instance`는 제거됐다. [Unity CLI reference](https://docs.unity.com/en-us/unity-cli/unity-cli-reference), [Unity Pipeline package](https://docs.unity.com/en-us/unity-production-pipeline/local-tools-cli/unity-pipeline-package)
 5. 기본 license 설정은 반드시 아래처럼 유지한다.
 
    ```json
@@ -67,6 +68,9 @@ flowchart LR
 | `OhMyFarm` | `/Volumes/WD_1TB/ForkDefault/OhMyFarm` | `OhMyFarm` |
 | `SheepWolf` | `/Volumes/WD_1TB/PuzzleGameFoundations/Sheep-Wolf` | `SheepWolf` |
 | `DigitalPet` | `/Volumes/WD_1TB/ForkDefault/DigitalPet/DigitalPet` | `DigitalPet` |
+| `ForgeXHero` | `/Volumes/WD_1TB/ForkDefault/ForgeXHero` | `ForgeXHero` |
+| `WaddleWay` | `/Volumes/WD_1TB/PuzzleGameFoundations/Waddle Way` | `WaddleWay` |
+| `Gonggi` | `/Volumes/WD_1TB/ForkDefault/Gonggi` | `Gonggi` |
 
 symlink path와 실제 path를 중복 등록해 concurrency를 늘릴 수 없다. 같은 `dev/inode`는 동일 프로젝트다. 프로젝트 경로가 존재하지 않거나 alias가 서로 다른 checkout을 가리키면 config load가 실패한다. Editor 프로세스도 표의 canonical 경로로 열어야 하며 `/Users/...` symlink 같은 다른 표기나 project path가 없는 Editor는 process audit에서 error로 차단한다. 설치된 entrypoint는 `canonical-devino-v1` prepared config를 강제하므로 raw source config를 직접 넘겨 우회할 수 없다.
 
@@ -260,11 +264,13 @@ stateDiagram-v2
 - dispatch 중 adapter가 끊기면 cancellation을 무시하는 공식 CLI child를 즉시 격리한다. journal 전이는 원래 요청 coroutine만 수행하며, mutation은 재전송 없이 `UNKNOWN_OUTCOME`로 fence하고 project lane과 global lease를 tool timeout 전에 해제한다. safe read도 끊긴 client 대신 자동 재시도하지 않는다.
 - 동기 mutation의 Unity 응답을 받았더라도 broker journal은 즉시 `COMPLETED`가 되지 않는다. broker가 adapter에 응답을 보낸 뒤 adapter가 stdout 전달 순서를 고정하고 application-level `response_ack`를 돌려줄 때까지 `DELIVERING`으로 유지한다. ACK 전 adapter 단절 또는 ACK timeout은 `UNKNOWN_OUTCOME`이며 같은 프로젝트의 다음 mutation을 차단한다.
 - adapter는 ACK 대상 응답을 stdout에 기록한 뒤 ACK를 보내고, 그 전에는 다음 stdin 요청을 읽지 않는다. 설치본과 broker build가 다르면 attach를 거부하므로 upgrade/rollback 뒤 기존 Codex·Claude session은 stable adapter를 재시작해야 한다.
+- delivery ACK 정보는 MCP `CallToolResult._meta`의 `com.zamgune.unity-mcp-router/operation`에만 둔다. 동기 응답에 router 전용 `structuredContent`를 새로 만들지 않으며 Unity가 돌려준 `content`와 기존 `structuredContent`를 그대로 보존한다. tracked async 응답의 공개 operation ID/state/status tool만 polling을 위해 semantic output에도 유지한다.
 - automatic retry는 명시적으로 분류된 safe read만 `recovery.safeReadRetries` 범위에서 가능하다. 알 수 없는 tool은 heavy mutation으로 fail-closed 한다.
 - built-in tool class는 immutable이다. `recovery.toolClasses`는 새 custom tool의 exact name에만
   사용할 수 있고, `eval`, test trigger 또는 다른 built-in mutation을 `safe_read`로 약화하는
   config는 startup에서 거부한다.
 - `UNKNOWN_OUTCOME`가 하나라도 남은 프로젝트는 새 mutation이 차단된다. `operation status`로 journal을 확인하고 Unity project state를 독립 검증한 뒤에만 admin resolution을 수행한다.
+- `reasonCode=UNITY_MAIN_THREAD_TIMEOUT`인 outcome은 프로젝트 fence에 더해 global heavy hold를 만든다. `status.budget.heldHeavy`와 `activeHeavy`에 반영되며, safe read는 허용하지만 다른 프로젝트의 heavy mutation도 `GLOBAL_HEAVY_UNKNOWN_OUTCOME_FENCE`로 거부한다. 이 hold는 broker restart 뒤에도 journal에서 복구된다.
 - operation journal에는 raw arguments 대신 payload SHA-256만 기록한다.
 
 Pipeline의 다음 비동기 작업은 trigger response로 끝났다고 보지 않는다. broker가 status tool을 poll하고 terminal state까지 heavy/source-refresh lease를 유지하며, broker가 재시작돼도 trigger를 재전송하지 않고 `RUNNING` 추적을 복구한다. 다른 agent가 terminal status를 trigger 응답 ACK보다 먼저 관찰해도 ACK 또는 LOST 결정 전에는 tracker와 lease를 해제하지 않는다. ACK이면 `COMPLETED`, broker restart·adapter disconnect·ACK timeout으로 전달을 증명할 수 없으면 `UNKNOWN_OUTCOME`가 된다. 실제 결과를 확인해 명시적으로 resolve하기 전에는 같은 trigger를 다시 보내지 않는다.
@@ -290,7 +296,7 @@ operation reconciliation만 노출한다.
 project-child restart는 stable wrapper에서도 의도적으로 거부하며, source-tree live-soak의
 명시적 `--with-restart` gate에서만 실행한다.
 
-`drain`은 queue와 lease뿐 아니라 모든 `DELIVERING` response ACK가 끝날 때까지 기다린다. `status`의 `deliveryPending`이 남아 있으면 adapter 상태를 확인하고, 결과가 실제 client에 전달됐다고 추측해 강제 완료 처리하지 않는다.
+`drain`은 queue와 lease, 모든 `DELIVERING` response ACK, `budget.heldHeavy`가 끝날 때까지 기다린다. `status`의 `deliveryPending` 또는 `heldHeavy`가 남아 있으면 adapter와 실제 Unity 작업 상태를 확인하고, 결과가 전달됐거나 작업이 끝났다고 추측해 강제 완료 처리하지 않는다.
 
 ```sh
 /Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin status --timeout-sec 10

@@ -21,6 +21,7 @@ async function fixture(t, {
   projectAccess = async () => ({ ok: true }),
   callTool = async () => ({ status: 'ready', projectPath: PROJECT_B.path, playMode: 'stopped' }),
   stopChild = async () => {},
+  prepareOpen = async () => {},
   openProject = async () => {},
   brokerIdle = async () => true,
   switchAllowed = async () => true,
@@ -49,6 +50,7 @@ async function fixture(t, {
     projectAccess,
     callTool,
     stopChild,
+    prepareOpen,
     openProject,
     brokerIdle,
     switchAllowed,
@@ -232,6 +234,28 @@ test('missing process-audit Editor identity blocks Editor open', async (t) => {
 
   assert.equal(openCount, 0);
   assert.deepEqual(blocked.blockers, ['PROCESS_AUDIT_UNSAFE']);
+});
+
+test('Hub path mismatch blocks before the Editor open side effect is journaled', async (t) => {
+  let openCount = 0;
+  const { lifecycle, journal } = await fixture(t, {
+    processAudit: async () => ({ ok: true, findings: [], editors: [] }),
+    prepareOpen: async (project) => {
+      assert.equal(project.key, PROJECT_B.key);
+      const error = new Error('Hub selected a symlink alias');
+      error.code = 'UNITY_HUB_PROJECT_PATH_MISMATCH';
+      throw error;
+    },
+    openProject: async () => { openCount += 1; },
+  });
+
+  const queued = await lifecycle.ensureProject(PROJECT_B);
+  const blocked = await waitForState(lifecycle, queued.operationId, EDITOR_HANDOFF_STATES.BLOCKED);
+
+  assert.equal(openCount, 0);
+  assert.deepEqual(blocked.blockers, ['UNITY_HUB_PROJECT_PATH_MISMATCH']);
+  assert.equal(journal.get(queued.operationId).state, 'CANCELLED');
+  assert.equal(journal.get(`${queued.operationId}:open`), null);
 });
 
 test('shutdown waits for an in-flight audit and forbids a later Editor open', async (t) => {

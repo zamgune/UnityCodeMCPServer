@@ -14,17 +14,18 @@ rollback only. They are not part of the normal automation path.
 
 | Component | Version | Role |
 | --- | --- | --- |
-| Unity Editor | `6000.3.17f1` | Pipeline host used for the 2026-08-03 live gates |
-| Unity CLI | `1.0.0-beta.3` | Official CLI and MCP child process |
-| `com.unity.pipeline` | `0.4.0-exp.1` | Official Editor command surface |
-| `com.zamgune.unity-pipeline-compat` | `0.4.0` candidate | Prior commands plus fail-closed single-seat Editor handoff |
+| Unity Editor | `6000.5.9f1` | Current development and promotion host |
+| Unity CLI | `1.0.0-beta.6` | Official CLI and MCP child process |
+| `com.unity.pipeline` | `0.5.0-exp.1` | Official Editor command surface |
+| `com.zamgune.unity-pipeline-compat` | `0.4.2` candidate | Prior commands plus Unity 6.5 build-environment diagnostics and fail-closed single-seat Editor handoff |
 | Input System | `1.19.0` | Named InputAction injection |
 | `Tools/unity-mcp-router` | `2.0.0-dev` | LaunchAgent broker, adapters, leases, journal, install and rollback |
 
 Unity CLI is beta, Pipeline is experimental, and router v2 is still an unreleased development
 build. Pin exact versions and rerun the relevant gates before upgrading any of them. Compatibility
-`0.4.0` and the Editor handoff queue remain candidates until their dedicated live gates pass. The
-completed earlier machine validation and its proof boundary are recorded in
+`0.4.2` and the Editor handoff queue remain candidates until their dedicated live gates pass. The
+completed 2026-08-03 machine validation used the prior Unity `6000.3.17f1`, CLI beta.3, Pipeline
+`0.4.0-exp.1`, and compat `0.4.0` baseline; its proof boundary remains historical and is recorded in
 [VALIDATION-2026-08-03.md](Tools/unity-mcp-router/docs/VALIDATION-2026-08-03.md).
 
 Official references:
@@ -50,6 +51,8 @@ The important boundaries are:
   write the same repository concurrently;
 - a mutation is never automatically replayed after dispatch. A timeout, cancellation, or lost
   response becomes `UNKNOWN_OUTCOME` until independently reconciled;
+- a Unity main-thread timeout response is an ambiguous running operation, so it survives broker
+  restart as a global heavy-work hold until an operator confirms the Unity work is terminal;
 - the validated default is one Unity Editor with multiple Codex/Claude clients. Two simultaneous
   Editors require a configured floating license server with two available seats and a separate
   two-Editor soak; increasing a config number alone is not sufficient.
@@ -76,7 +79,7 @@ For the validated project baseline, install Pipeline explicitly:
 unity auth login
 unity pipeline install \
   --project-path "/absolute/path/to/UnityProject" \
-  --package-version 0.4.0-exp.1
+  --package-version 0.5.0-exp.1
 ```
 
 Do not commit a moving Git dependency for the compatibility package. This repository embeds the
@@ -182,7 +185,9 @@ evidence does not prove Android/iOS device behavior.
 The legacy package remains under `Assets/Plugins/UnityCodeMcpServer`; its frozen transport is
 documented in [README_STDIO.md](README_STDIO.md). Never register that bridge and the managed
 adapter at the same time. Rollback is a reversible incident action, not a second permanent
-configuration.
+configuration. Its asmdefs and bundled plugin importers use `!UNITY_6000_5_OR_NEWER`, so the frozen
+rollback implementation remains available to its pinned pre-6.5 environment without colliding
+with the official Pipeline assemblies in the Unity 6.5 development project.
 
 ## Security
 

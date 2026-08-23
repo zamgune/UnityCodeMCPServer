@@ -89,6 +89,8 @@ OPERATION_ID=
 OPERATION_CONFIRM_RUNNING=0
 EDITOR_ACTION=
 EDITOR_SUBJECT=
+WORKSPACE_ACTION=
+WORKSPACE_TOKEN=
 case "$COMMAND" in
   status|doctor|drain|resume)
     shift
@@ -157,6 +159,19 @@ case "$COMMAND" in
         ;;
     esac
     ;;
+  workspace)
+    [ "$#" -eq 4 ] || { printf 'unity-mcp-admin: workspace resolve requires UUID --confirm\n' >&2; exit 64; }
+    WORKSPACE_ACTION=$2
+    WORKSPACE_TOKEN=$3
+    [ "$WORKSPACE_ACTION" = resolve ] && [ "$4" = --confirm ] || {
+      printf 'unity-mcp-admin: workspace arguments are rejected\n' >&2
+      exit 64
+    }
+    is_uuid "$WORKSPACE_TOKEN" || {
+      printf 'unity-mcp-admin: workspace lease token must be a canonical UUID\n' >&2
+      exit 64
+    }
+    ;;
   *)
     printf 'unity-mcp-admin: rejected command: %s\n' "$COMMAND" >&2
     exit 64
@@ -189,6 +204,10 @@ if [ "$COMMAND" = operation ]; then
       --confirm-no-longer-running --runtime-root "$RELEASE_DIR" --config "$SELF_DIR/config.json"
   fi
   exec "$NODE_BIN" "$SELF_DIR/broker-admin.mjs" operation resolve "$OPERATION_ID" confirmed_completed \
+    --runtime-root "$RELEASE_DIR" --config "$SELF_DIR/config.json"
+fi
+if [ "$COMMAND" = workspace ]; then
+  exec "$NODE_BIN" "$SELF_DIR/broker-admin.mjs" workspace "$WORKSPACE_ACTION" "$WORKSPACE_TOKEN" --confirm \
     --runtime-root "$RELEASE_DIR" --config "$SELF_DIR/config.json"
 fi
 if [ -n "$TIMEOUT_ARGS" ]; then

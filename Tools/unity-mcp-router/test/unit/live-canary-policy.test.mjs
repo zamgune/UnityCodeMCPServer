@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { ROUTER_OPERATION_META_KEY } from '../../lib/mcp-protocol.mjs';
 import {
   assertCleanActiveRecompile,
   assertCompletedReloadOperation,
@@ -21,14 +22,18 @@ import {
   waitForToolCatalog,
 } from '../../scripts/live-canary.mjs';
 
-function toolResponse(value) {
+function toolResponse(value, { content = value, operation, structured = true } = {}) {
+  const result = {
+    content: [{ type: 'text', text: typeof content === 'string' ? content : JSON.stringify(content) }],
+  };
+  if (structured) result.structuredContent = value;
+  if (operation !== undefined) {
+    result._meta = { [ROUTER_OPERATION_META_KEY]: operation };
+  }
   return {
     jsonrpc: '2.0',
     id: 1,
-    result: {
-      content: [{ type: 'text', text: JSON.stringify(value) }],
-      structuredContent: value,
-    },
+    result,
   };
 }
 
@@ -170,63 +175,99 @@ test('editor readiness requires exact idle state and project identity', () => {
 });
 
 test('reload trigger requires active clean status and complete router tracking metadata', () => {
-  const tracked = {
+  const semantic = {
     status: 'triggered',
     failed: false,
     errors: [],
     isCompiling: false,
     routerOperationState: 'RUNNING',
     routerOperationId: 'reload-op',
-    routerDeliveryAckRequired: true,
     statusTool: 'recompile_status',
   };
-  assert.equal(assertTrackedReloadTrigger(toolResponse(tracked)), 'reload-op');
+  const operation = {
+    routerOperationState: 'RUNNING',
+    routerOperationId: 'reload-op',
+    routerDeliveryAckRequired: true,
+  };
+  assert.equal(assertTrackedReloadTrigger(toolResponse(semantic, {
+    content: 'Compilation requested.',
+    operation,
+  })), 'reload-op');
   for (const mutate of [
-    (value) => { value.status = 'completed'; },
-    (value) => { value.routerOperationState = 'COMPLETED'; },
-    (value) => { delete value.routerOperationId; },
-    (value) => { value.routerDeliveryAckRequired = false; },
-    (value) => { value.statusTool = 'other_status'; },
-    (value) => { value.isCompiling = true; },
+    (value) => { value.semantic.status = 'completed'; },
+    (value) => { value.operation.routerOperationState = 'COMPLETED'; },
+    (value) => { delete value.operation.routerOperationId; },
+    (value) => { value.operation.routerDeliveryAckRequired = false; },
+    (value) => { value.semantic.statusTool = 'other_status'; },
+    (value) => { value.semantic.isCompiling = true; },
+    (value) => { value.semantic.routerOperationId = 'other-op'; },
+    (value) => { value.semantic.routerOperationState = 'COMPLETED'; },
+    (value) => { value.semantic.routerDeliveryAckRequired = true; },
   ]) {
-    const invalid = structuredClone(tracked);
+    const invalid = {
+      semantic: structuredClone(semantic),
+      operation: structuredClone(operation),
+    };
     mutate(invalid);
-    assert.throws(() => assertTrackedReloadTrigger(toolResponse(invalid)), CanaryPolicyError);
+    assert.throws(
+      () => assertTrackedReloadTrigger(toolResponse(invalid.semantic, { operation: invalid.operation })),
+      CanaryPolicyError,
+    );
   }
   assert.equal(assertTrackedReloadTrigger(toolResponse({
-    ...tracked, status: 'compiling', isCompiling: true,
-  })), 'reload-op');
+    ...semantic, status: 'compiling', isCompiling: true,
+  }, { operation })), 'reload-op');
+  assert.throws(
+    () => assertTrackedReloadTrigger(toolResponse(semantic)),
+    /omitted router operation _meta/,
+  );
+  assert.throws(
+    () => assertTrackedReloadTrigger(toolResponse(semantic, { operation, structured: false })),
+    /omitted semantic structuredContent/,
+  );
 });
 
 test('reload dispatch accepts an exact synchronous clean completion contract', () => {
-  const synchronous = {
+  const semantic = {
     status: 'completed',
     failed: false,
     errors: [],
     isCompiling: false,
+  };
+  const operation = {
     routerOperationState: 'COMPLETED',
     routerOperationId: 'reload-sync',
     routerDeliveryAckRequired: true,
   };
-  const accepted = classifyReloadDispatch(toolResponse(synchronous));
+  const accepted = classifyReloadDispatch(toolResponse(semantic, { operation, structured: false }));
   assert.equal(accepted.kind, 'synchronous');
   assert.equal(accepted.operationId, 'reload-sync');
   assert.equal(accepted.requireStatusTool, false);
+  assert.equal(classifyReloadDispatch(toolResponse(semantic, { operation })).kind, 'synchronous');
 
   for (const mutate of [
-    (value) => { value.failed = true; },
-    (value) => { value.errors = ['CS1002']; },
-    (value) => { value.isCompiling = true; },
-    (value) => { value.routerOperationState = 'RUNNING'; },
-    (value) => { delete value.routerOperationId; },
-    (value) => { value.routerDeliveryAckRequired = false; },
-    (value) => { value.statusTool = 'recompile_status'; },
-    (value) => { value.statusTool = 'build_status'; },
+    (value) => { value.semantic.failed = true; },
+    (value) => { value.semantic.errors = ['CS1002']; },
+    (value) => { value.semantic.isCompiling = true; },
+    (value) => { value.operation.routerOperationState = 'RUNNING'; },
+    (value) => { delete value.operation.routerOperationId; },
+    (value) => { value.operation.routerDeliveryAckRequired = false; },
+    (value) => { value.semantic.routerOperationId = 'reload-sync'; },
+    (value) => { value.semantic.routerOperationState = 'COMPLETED'; },
+    (value) => { value.semantic.routerDeliveryAckRequired = true; },
+    (value) => { value.semantic.statusTool = 'recompile_status'; },
   ]) {
-    const invalid = structuredClone(synchronous);
+    const invalid = {
+      semantic: structuredClone(semantic),
+      operation: structuredClone(operation),
+    };
     mutate(invalid);
-    assert.throws(() => classifyReloadDispatch(toolResponse(invalid)), CanaryPolicyError);
+    assert.throws(
+      () => classifyReloadDispatch(toolResponse(invalid.semantic, { operation: invalid.operation })),
+      CanaryPolicyError,
+    );
   }
+  assert.throws(() => classifyReloadDispatch(toolResponse(semantic)), /omitted router operation _meta/);
 });
 
 test('reload operation closeout accepts only the same COMPLETED journal record', () => {

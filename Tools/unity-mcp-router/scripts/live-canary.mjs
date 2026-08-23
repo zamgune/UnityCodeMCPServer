@@ -12,8 +12,12 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import { JsonRpcLineDecoder, encodeJsonRpcLine } from '../lib/mcp-framing.mjs';
+import {
+  MCP_PROTOCOL_VERSION,
+  readRouterOperationMeta,
+} from '../lib/mcp-protocol.mjs';
 
-export const MCP_PROTOCOL_VERSION = '2025-06-18';
+export { MCP_PROTOCOL_VERSION };
 export const STABLE_ADAPTER_PATH = '/Users/zamgune/.unity-mcp-router/bin/unity-mcp-adapter';
 export const REQUIRED_TOOLS = Object.freeze([
   'editor_status',
@@ -129,7 +133,11 @@ export function recompileObservation(response) {
     throw new CanaryPolicyError('recompile tool returned an error');
   }
   const candidates = [];
-  visitJson(response?.result, (value) => {
+  const semanticValue = response?.result?.structuredContent;
+  const observationSource = semanticValue && typeof semanticValue === 'object' && !Array.isArray(semanticValue)
+    ? semanticValue
+    : response?.result?.content;
+  visitJson(observationSource, (value) => {
     if (typeof value.status !== 'string') return;
     const status = value.status.toLowerCase();
     if (!['triggered', 'compiling', 'completed', 'up_to_date', 'failed', 'error'].includes(status)) return;
@@ -246,12 +254,19 @@ export function assertTrackedReloadTrigger(response) {
  */
 export function classifyReloadDispatch(response) {
   const observation = recompileObservation(response);
-  const metadata = structuredContent(response, 'recompile trigger');
+  const semantic = response?.result?.structuredContent;
+  const metadata = routerOperationMetadata(response, 'recompile trigger');
   if (typeof metadata.routerOperationId !== 'string' || metadata.routerOperationId.length === 0) {
     throw new CanaryPolicyError('reload operation id is missing');
   }
   if (metadata.routerDeliveryAckRequired !== true) {
     throw new CanaryPolicyError('reload delivery ACK contract is missing');
+  }
+  if (
+    semantic && typeof semantic === 'object' && !Array.isArray(semantic) &&
+    Object.hasOwn(semantic, 'routerDeliveryAckRequired')
+  ) {
+    throw new CanaryPolicyError('reload delivery ACK metadata polluted structuredContent');
   }
 
   if (['triggered', 'compiling'].includes(observation.status)) {
@@ -259,7 +274,16 @@ export function classifyReloadDispatch(response) {
     if (metadata.routerOperationState !== 'RUNNING') {
       throw new CanaryPolicyError('active reload was not tracked as RUNNING');
     }
-    if (metadata.statusTool !== 'recompile_status') {
+    if (!semantic || typeof semantic !== 'object' || Array.isArray(semantic)) {
+      throw new CanaryPolicyError('active reload omitted semantic structuredContent');
+    }
+    if (
+      semantic.routerOperationId !== metadata.routerOperationId ||
+      semantic.routerOperationState !== metadata.routerOperationState
+    ) {
+      throw new CanaryPolicyError('active reload semantic metadata does not match router sideband');
+    }
+    if (semantic.statusTool !== 'recompile_status') {
       throw new CanaryPolicyError('active reload status tool contract is missing');
     }
     return Object.freeze({
@@ -274,8 +298,11 @@ export function classifyReloadDispatch(response) {
   if (metadata.routerOperationState !== 'COMPLETED') {
     throw new CanaryPolicyError('synchronous reload was not reported as COMPLETED');
   }
-  if (Object.hasOwn(metadata, 'statusTool')) {
-    throw new CanaryPolicyError('synchronous reload must not advertise a status tool');
+  if (
+    semantic && typeof semantic === 'object' && !Array.isArray(semantic) &&
+    ['routerOperationId', 'routerOperationState', 'statusTool'].some((key) => Object.hasOwn(semantic, key))
+  ) {
+    throw new CanaryPolicyError('synchronous reload must expose router operation data only through _meta');
   }
   return Object.freeze({
     kind: 'synchronous',
@@ -429,6 +456,18 @@ export function structuredContent(response, label) {
   }
   const value = response?.result?.structuredContent;
   if (!value || typeof value !== 'object') throw new CanaryPolicyError(`${label} omitted structuredContent`);
+  return value;
+}
+
+export function routerOperationMetadata(response, label) {
+  if (response?.error || response?.result?.isError === true) {
+    const text = response?.result?.content?.map((part) => part?.text).filter(Boolean).join(' ');
+    throw new CanaryPolicyError(`${label} failed${text ? `: ${text}` : ''}`);
+  }
+  const value = readRouterOperationMeta(response?.result);
+  if (!value) {
+    throw new CanaryPolicyError(`${label} omitted router operation _meta`);
+  }
   return value;
 }
 

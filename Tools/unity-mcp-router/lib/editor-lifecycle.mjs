@@ -238,6 +238,7 @@ export class EditorLifecycle {
     projectAccess,
     callTool,
     stopChild = async () => {},
+    prepareOpen = async () => {},
     openProject,
     brokerIdle = async () => true,
     switchAllowed = async () => true,
@@ -248,8 +249,11 @@ export class EditorLifecycle {
     operationId = () => randomUUID(),
   }) {
     if (!config || !journal || typeof processAudit !== 'function' || typeof projectAccess !== 'function' ||
-      typeof callTool !== 'function' || typeof openProject !== 'function' || typeof onStateChange !== 'function') {
-      throw new TypeError('EditorLifecycle requires config, journal, processAudit, projectAccess, callTool, and openProject');
+      typeof callTool !== 'function' || typeof prepareOpen !== 'function' ||
+      typeof openProject !== 'function' || typeof onStateChange !== 'function') {
+      throw new TypeError(
+        'EditorLifecycle requires config, journal, processAudit, projectAccess, callTool, prepareOpen, and openProject',
+      );
     }
     this.config = config;
     this.options = normalizeOptions(config);
@@ -261,6 +265,7 @@ export class EditorLifecycle {
     this.projectAccess = projectAccess;
     this.callTool = callTool;
     this.stopChild = stopChild;
+    this.prepareOpen = prepareOpen;
     this.openProject = openProject;
     this.brokerIdle = brokerIdle;
     this.switchAllowed = switchAllowed;
@@ -514,8 +519,9 @@ export class EditorLifecycle {
       await this.#waitUntilReady(job, current, this.options.pipelineTimeoutMs);
       return;
     }
+    if (!(await this.#checkOpenPreflight(job))) return;
     if (!current) {
-      await this.#dispatchOpen(job);
+      await this.#dispatchOpen(job, { preflightChecked: true });
       return;
     }
 
@@ -638,13 +644,14 @@ export class EditorLifecycle {
     return false;
   }
 
-  async #dispatchOpen(job) {
+  async #dispatchOpen(job, { preflightChecked = false } = {}) {
     this.#assertOpen();
     if (job.observeOnly || job.openDispatched) {
       await this.#finish(job, EDITOR_HANDOFF_STATES.UNKNOWN_OUTCOME, ['OPEN_REDISPATCH_FORBIDDEN']);
       return;
     }
     if (!(await this.#checkAccess(job))) return;
+    if (!preflightChecked && !(await this.#checkOpenPreflight(job))) return;
     this.#assertOpen();
 
     const parentState = this.journal.get(job.operationId)?.state;
@@ -684,6 +691,19 @@ export class EditorLifecycle {
       return;
     }
     await this.#waitForTargetProcess(job);
+  }
+
+  async #checkOpenPreflight(job) {
+    try {
+      await this.prepareOpen(job.project);
+      this.#assertOpen();
+      return true;
+    } catch (error) {
+      await this.#finish(job, EDITOR_HANDOFF_STATES.BLOCKED, [
+        error?.code ?? 'EDITOR_OPEN_PREFLIGHT_FAILED',
+      ]);
+      return false;
+    }
   }
 
   async #waitForTargetProcess(job) {

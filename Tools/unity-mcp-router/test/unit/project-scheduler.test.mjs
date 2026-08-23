@@ -280,3 +280,28 @@ test('expired queued work is rejected before dispatch', async () => {
   assert.equal(dispatched, false);
   scheduler.close();
 });
+
+test('a durable heavy hold consumes the global slot until explicitly released', async () => {
+  const budget = new SchedulerBudget({ maxPendingTotal: 8, maxHeavyInFlight: 1 });
+
+  assert.equal(budget.holdHeavy('timed-out-build'), true);
+  assert.equal(budget.holdHeavy('timed-out-build'), false);
+  assert.equal(budget.hasHeavyHold('timed-out-build'), true);
+  assert.deepEqual(budget.listHeavyHolds(), ['timed-out-build']);
+  assert.deepEqual(budget.snapshot(), {
+    pendingTotal: 0,
+    maxPendingTotal: 8,
+    activeHeavy: 1,
+    runningHeavy: 0,
+    heldHeavy: 1,
+    maxHeavyInFlight: 1,
+  });
+  assert.equal(budget.tryStart(HEAVY), false);
+  assert.equal(budget.tryStart(SAFE_READ), true);
+
+  assert.equal(budget.releaseHeavyHold('timed-out-build'), true);
+  assert.equal(budget.releaseHeavyHold('timed-out-build'), false);
+  assert.equal(budget.tryStart(HEAVY), true);
+  budget.finish(HEAVY);
+  assert.equal(budget.snapshot().activeHeavy, 0);
+});

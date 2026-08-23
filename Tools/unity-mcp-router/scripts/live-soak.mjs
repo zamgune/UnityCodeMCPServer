@@ -28,6 +28,7 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import { JsonRpcLineDecoder, encodeJsonRpcLine } from '../lib/mcp-framing.mjs';
+import { readRouterOperationMeta } from '../lib/mcp-protocol.mjs';
 import {
   MCP_PROTOCOL_VERSION,
   STABLE_ADAPTER_PATH,
@@ -1510,10 +1511,21 @@ async function performFairnessBurst(state) {
   const operationIds = [];
   for (const entry of settled) {
     assertNoopDispatch(recompileObservation(entry.value));
-    const metadata = entry.value?.result?.structuredContent;
+    const semantic = entry.value?.result?.structuredContent;
+    const metadata = readRouterOperationMeta(entry.value?.result);
     if (typeof metadata?.routerOperationId !== 'string' || metadata.routerOperationId.length === 0 ||
         metadata.routerOperationState !== 'COMPLETED' || metadata.routerDeliveryAckRequired !== true) {
       throw new SoakPolicyError('fairness no-op omitted completed delivery metadata', 'FAIRNESS_OPERATION_METADATA_DRIFT');
+    }
+    if (
+      semantic && typeof semantic === 'object' && !Array.isArray(semantic) &&
+      ['routerOperationId', 'routerOperationState', 'routerDeliveryAckRequired', 'statusTool']
+        .some((key) => Object.hasOwn(semantic, key))
+    ) {
+      throw new SoakPolicyError(
+        'fairness no-op polluted structuredContent with router operation metadata',
+        'FAIRNESS_OPERATION_METADATA_DRIFT',
+      );
     }
     operationIds.push(metadata.routerOperationId);
   }

@@ -18,6 +18,7 @@ import { loadOrCreateAdminToken } from './lib/admin-token.mjs';
 import { BUILD_INFO } from './lib/build-info.mjs';
 import { classifyFailure, FAILURE_CLASSIFICATION_SAMPLES } from './lib/failure-classifier.mjs';
 import { JsonRpcLineDecoder, encodeJsonRpcLine } from './lib/mcp-framing.mjs';
+import { readRouterOperationMeta } from './lib/mcp-protocol.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ADAPTER_VERSION = BUILD_INFO.version;
@@ -86,7 +87,7 @@ function writeClient(message) {
     shutdown(1);
     return;
   }
-  const metadata = message?.result?.structuredContent;
+  const metadata = readRouterOperationMeta(message?.result);
   const requiresDeliveryAck = metadata?.routerDeliveryAckRequired === true &&
     typeof metadata.routerOperationId === 'string';
   if (requiresDeliveryAck) {

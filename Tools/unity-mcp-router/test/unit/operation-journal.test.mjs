@@ -243,6 +243,37 @@ test('durably resolves an UNKNOWN_OUTCOME only with an explicit safe resolution'
   await reopened.close();
 });
 
+test('persists a machine-readable UNKNOWN_OUTCOME reason across restart', async (t) => {
+  const file = await fixture(t);
+  const journal = await OperationJournal.open(file);
+  await journal.recordReceived({ operationId: 'op-timeout', project: 'A', method: 'build', payload: {} });
+  await journal.markQueued('op-timeout');
+  await journal.markDispatching('op-timeout');
+  await journal.markUnknownOutcome('op-timeout', 'UNITY_MAIN_THREAD_TIMEOUT');
+  await journal.close();
+
+  const reopened = await OperationJournal.open(file);
+  assert.equal(reopened.get('op-timeout').state, OPERATION_STATES.UNKNOWN_OUTCOME);
+  assert.equal(reopened.get('op-timeout').reasonCode, 'UNITY_MAIN_THREAD_TIMEOUT');
+  await reopened.close();
+
+  const persisted = await readFile(file, 'utf8');
+  assert.match(persisted, /"reasonCode":"UNITY_MAIN_THREAD_TIMEOUT"/);
+});
+
+test('rejects unsafe UNKNOWN_OUTCOME reason codes', async (t) => {
+  const file = await fixture(t);
+  const journal = await OperationJournal.open(file);
+  await journal.recordReceived({ operationId: 'op-invalid-reason', payload: {} });
+  await journal.markQueued('op-invalid-reason');
+  await journal.markDispatching('op-invalid-reason');
+  await assert.rejects(
+    async () => journal.markUnknownOutcome('op-invalid-reason', 'not safe'),
+    rejectsWithCode('JOURNAL_INVALID_INPUT'),
+  );
+  await journal.close();
+});
+
 test('persists a tracked background operation as RUNNING across restart', async (t) => {
   const file = await fixture(t);
   const journal = await OperationJournal.open(file);

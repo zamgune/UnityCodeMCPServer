@@ -22,7 +22,9 @@
         "System.Text.Encodings.Web.dll"
     ],
     "autoReferenced": true,
-    "defineConstraints": [],
+    "defineConstraints": [
+        "!UNITY_6000_5_OR_NEWER"
+    ],
     "versionDefines": [],
     "noEngineReferences": false
 }

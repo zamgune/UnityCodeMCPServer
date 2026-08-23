@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { AuthManager } from './auth-manager.mjs';
@@ -17,7 +18,11 @@ import { EditorLifecycle, EDITOR_HANDOFF_STATES } from './editor-lifecycle.mjs';
 import { LeaseManager } from './lease-manager.mjs';
 import { NULL_LOGGER } from './logger.mjs';
 import { auditSystemProcesses } from './macos-process-audit.mjs';
-import { MCP_PROTOCOL_VERSION as PROTOCOL_VERSION, negotiateMcpProtocolVersion } from './mcp-protocol.mjs';
+import {
+  MCP_PROTOCOL_VERSION as PROTOCOL_VERSION,
+  negotiateMcpProtocolVersion,
+  withRouterOperationMeta,
+} from './mcp-protocol.mjs';
 import { OPERATION_STATES } from './operation-journal.mjs';
 import { ProjectAccessAuditor } from './project-access-audit.mjs';
 import { ProjectScheduler, SchedulerBudget, SchedulerError } from './project-scheduler.mjs';
@@ -32,6 +37,7 @@ const DELIVERY_ACK_TIMEOUT_MS = 5_000;
 const TOOL_CATALOG_RECOVERY_GRACE_MS = 10_000;
 const TOOL_CATALOG_RECOVERY_POLL_MS = 200;
 const LIFECYCLE_CATALOG_PROOF_TIMEOUT_MS = 2_000;
+const UNITY_MAIN_THREAD_TIMEOUT_REASON = 'UNITY_MAIN_THREAD_TIMEOUT';
 
 function textResult(text, isError = false, structuredContent = undefined) {
   return {
@@ -73,13 +79,23 @@ function lifecycleToolErrorText(result) {
   return parts.join('\n').trim().slice(0, 512);
 }
 
-function withOperationMetadata(result, operationId, state, extra = {}) {
-  const base = result && typeof result === 'object' ? result : textResult(String(result ?? ''));
+function withOperationMetadata(result, operationId, state, {
+  deliveryAckRequired = false,
+  publicOperationStatus = false,
+  structuredExtra = {},
+} = {}) {
+  const base = withRouterOperationMeta(result, operationId, state, { deliveryAckRequired });
+  if (!publicOperationStatus) return base;
   const structured = base.structuredContent && typeof base.structuredContent === 'object'
     ? base.structuredContent : {};
   return {
     ...base,
-    structuredContent: { ...structured, routerOperationId: operationId, routerOperationState: state, ...extra },
+    structuredContent: {
+      ...structured,
+      routerOperationId: operationId,
+      routerOperationState: state,
+      ...structuredExtra,
+    },
   };
 }
 
@@ -95,11 +111,52 @@ function execFileBounded(file, args, options) {
         error.stderrBytes = Buffer.byteLength(String(stderr ?? ''));
         reject(error);
       } else resolve({
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? ''),
         stdoutBytes: Buffer.byteLength(String(stdout ?? '')),
         stderrBytes: Buffer.byteLength(String(stderr ?? '')),
       });
     });
   });
+}
+
+function unityProjectInfoError(code, message, details = undefined, cause = undefined) {
+  const error = new Error(message, cause === undefined ? undefined : { cause });
+  error.code = code;
+  if (details !== undefined) error.details = details;
+  return error;
+}
+
+export function assertExactUnityProjectInfo(output, expectedProjectPath) {
+  let payload;
+  try {
+    payload = JSON.parse(String(output ?? ''));
+  } catch (cause) {
+    throw unityProjectInfoError(
+      'UNITY_HUB_PROJECT_INFO_INVALID',
+      'Unity CLI projects info returned invalid JSON before Editor open',
+      undefined,
+      cause,
+    );
+  }
+  const observedPath = payload?.data?.path;
+  if (payload?.success !== true || typeof observedPath !== 'string' || observedPath.length === 0) {
+    throw unityProjectInfoError(
+      'UNITY_HUB_PROJECT_INFO_INVALID',
+      'Unity CLI projects info did not prove an exact Hub project path before Editor open',
+      { success: payload?.success, observedPath: observedPath ?? null },
+    );
+  }
+  const expected = path.resolve(expectedProjectPath);
+  const observed = path.resolve(observedPath);
+  if (observed !== expected) {
+    throw unityProjectInfoError(
+      'UNITY_HUB_PROJECT_PATH_MISMATCH',
+      `Unity Hub would open "${observed}" instead of configured path "${expected}"`,
+      { expectedProjectPath: expected, observedProjectPath: observed },
+    );
+  }
+  return Object.freeze({ expectedProjectPath: expected, observedProjectPath: observed });
 }
 
 function validInitializeParams(params) {
@@ -174,6 +231,34 @@ function responseLooksCancelled(response) {
       .join(' ')
     : '';
   return /\bcancel(?:led|ed|ation)?\b/i.test(`${status} ${content}`);
+}
+
+export function ambiguousUnityExecutionTimeout(response) {
+  const structured = response?.result?.structuredContent;
+  const messages = [];
+  if (typeof response?.error?.message === 'string') messages.push(response.error.message);
+  if (structured && typeof structured === 'object') {
+    for (const key of ['message', 'error', 'errorMessage', 'detail']) {
+      if (typeof structured[key] === 'string') messages.push(structured[key]);
+    }
+  }
+  for (const item of Array.isArray(response?.result?.content) ? response.result.content : []) {
+    if (item?.type === 'text' && typeof item.text === 'string') messages.push(item.text);
+  }
+  const errorLike = Boolean(
+    response?.error
+    || response?.result?.isError === true
+    || structured?.ok === false
+    || (Number.isFinite(structured?.httpStatus) && structured.httpStatus >= 400),
+  );
+  if (!errorLike) return null;
+  const match = messages.join('\n').match(/main thread operation timed out after\s+(\d+)ms/i);
+  if (!match) return null;
+  return Object.freeze({
+    reasonCode: UNITY_MAIN_THREAD_TIMEOUT_REASON,
+    timeoutMs: Number(match[1]),
+    ...(Number.isFinite(structured?.httpStatus) ? { httpStatus: structured.httpStatus } : {}),
+  });
 }
 
 function isNativeTool(name) {
@@ -293,7 +378,7 @@ export const BROKER_TOOLS = Object.freeze([
   },
   {
     name: 'unity_router_operation_resolve',
-    description: 'Explicitly resolve a verified UNKNOWN_OUTCOME and remove its project mutation fence.',
+    description: 'Explicitly resolve a verified UNKNOWN_OUTCOME and remove its project mutation fence. Main-thread timeout fences also require confirmation that the background work is no longer running.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -339,6 +424,7 @@ export class BrokerCore {
     processAuditor = auditSystemProcesses,
     projectAccessAuditor = null,
     editorLifecycle = null,
+    projectOpenPreflight = null,
     toolRefreshIntervalMs = 5_000,
     toolCatalogRecoveryGraceMs = TOOL_CATALOG_RECOVERY_GRACE_MS,
     toolCatalogRecoveryPollMs = TOOL_CATALOG_RECOVERY_POLL_MS,
@@ -351,6 +437,7 @@ export class BrokerCore {
     this.brokerId = brokerId;
     this.configHash = configHash;
     this.processAuditor = processAuditor;
+    this.projectOpenPreflight = projectOpenPreflight;
     this.auditCache = null;
     this.auditInFlight = null;
     this.auditGeneration = 0;
@@ -412,6 +499,9 @@ export class BrokerCore {
       callTool: (project, name, args, timeoutMs) =>
         this.#callEditorLifecycleTool(project, name, args, timeoutMs),
       stopChild: (project) => this.children.get(project.key)?.stop('editor-handoff') ?? Promise.resolve(),
+      prepareOpen: (project) => this.projectOpenPreflight
+        ? this.projectOpenPreflight(project)
+        : this.#preflightEditorProject(project),
       openProject: (project) => this.#openEditorProject(project),
       brokerIdle: (project) => this.#editorSwitchBlockers(project),
       onStateChange: (snapshot) => this.#onEditorLifecycleState(snapshot),
@@ -726,6 +816,14 @@ export class BrokerCore {
       await this.editorLifecycle.ready?.();
       if (connection.closed || this.connections.get(connection.id) !== connection) return;
       if (connection.earlyCancellations.has(incomingRequestKey)) {
+        if (method === 'tools/call') {
+          connection.send(responseResult(id, textResult(
+            `Request ${String(id)} cancelled before broker dispatch.`,
+            true,
+            { state: 'CANCELLED', code: 'NOT_DISPATCHED' },
+          )));
+          return;
+        }
         throw new SchedulerError(`Request ${String(id)} cancelled before broker dispatch`, {
           code: 'CANCELLED',
         });
@@ -1089,7 +1187,7 @@ export class BrokerCore {
             inactiveBeforeChild,
             operation.operationId,
             'CANCELLED',
-            { dispatchBlocked: true },
+            { publicOperationStatus: true, structuredExtra: { dispatchBlocked: true } },
           );
         }
         operation.state = 'CANCELLED';
@@ -1119,7 +1217,7 @@ export class BrokerCore {
             dispatchViolation,
             operation.operationId,
             'CANCELLED',
-            { dispatchBlocked: true },
+            { publicOperationStatus: true, structuredExtra: { dispatchBlocked: true } },
           );
         }
         operation.state = 'COMMITTING';
@@ -1146,7 +1244,10 @@ export class BrokerCore {
                   inactiveBeforeRetry,
                   operation.operationId,
                   'CANCELLED',
-                  { dispatchBlocked: true, retryBlocked: true },
+                  {
+                    publicOperationStatus: true,
+                    structuredExtra: { dispatchBlocked: true, retryBlocked: true },
+                  },
                 )
               : inactiveBeforeRetry;
           }
@@ -1167,7 +1268,10 @@ export class BrokerCore {
                 attemptViolation,
                 operation.operationId,
                 'CANCELLED',
-                { dispatchBlocked: true, retriesUsed },
+                {
+                  publicOperationStatus: true,
+                  structuredExtra: { dispatchBlocked: true, retriesUsed },
+                },
               )
             : attemptViolation;
         }
@@ -1258,6 +1362,27 @@ export class BrokerCore {
               { operationId: operation.operationId, state: 'CANCELLED', code: 'NOT_DISPATCHED' },
             );
           }
+          const ambiguousTimeout = ambiguousUnityExecutionTimeout(response);
+          if (ambiguousTimeout) {
+            await this.journal.markUnknownOutcome(
+              operation.operationId,
+              ambiguousTimeout.reasonCode,
+            );
+            operation.state = 'UNKNOWN_OUTCOME';
+            this.#addUnknownFence(project.key, operation.operationId);
+            return textResult(
+              `Unity reported a main-thread execution timeout after dispatch, but the underlying operation may ` +
+                `still be running. Operation: ${operation.operationId}. Verify Editor/output state, then resolve ` +
+                `the fence with confirmNoLongerRunning=true.`,
+              true,
+              {
+                operationId: operation.operationId,
+                state: 'UNKNOWN_OUTCOME',
+                code: 'UNITY_MAIN_THREAD_TIMEOUT_UNKNOWN_OUTCOME',
+                ...ambiguousTimeout,
+              },
+            );
+          }
           const asyncSpec = asyncSpecFor(operation.toolName, args);
           if (responseStartsAsync(asyncSpec, response)) {
             const correlation = asyncCorrelationFor(asyncSpec, response);
@@ -1288,8 +1413,9 @@ export class BrokerCore {
               deliveryUncertain: !operation.deliveryAcknowledged,
             });
             return withOperationMetadata(response.result, operation.operationId, 'RUNNING', {
-              statusTool: asyncSpec.statusTool,
-              routerDeliveryAckRequired: true,
+              deliveryAckRequired: true,
+              publicOperationStatus: true,
+              structuredExtra: { statusTool: asyncSpec.statusTool },
             });
           }
           if (operation.toolName === 'recompile') {
@@ -1334,19 +1460,16 @@ export class BrokerCore {
         await this.#observeAsyncResponse(project, operation.toolName, response);
 
         if (response.error) {
-          const failureResult = textResult(`Unity request failed: ${response.error.message}`, true, {
-            operationId: classification.mutation ? operation.operationId : undefined,
-            state: classification.mutation ? 'COMPLETED' : undefined,
-          });
+          const failureResult = textResult(`Unity request failed: ${response.error.message}`, true);
           return classification.mutation
             ? withOperationMetadata(failureResult, operation.operationId, 'COMPLETED', {
-                routerDeliveryAckRequired: true,
+                deliveryAckRequired: true,
               })
             : failureResult;
         }
         return classification.mutation
           ? withOperationMetadata(response.result, operation.operationId, 'COMPLETED', {
-              routerDeliveryAckRequired: true,
+              deliveryAckRequired: true,
             })
           : response.result;
       }
@@ -1934,16 +2057,19 @@ export class BrokerCore {
       this.draining = true;
       const deadline = Date.now() + (args.timeoutSec ?? 60) * 1000;
       while (
-        (this.budget.snapshot().pendingTotal > 0 || this.#allDeliveryPending().length > 0 ||
+        (this.budget.snapshot().pendingTotal > 0 || this.budget.snapshot().activeHeavy > 0 ||
+          this.#allDeliveryPending().length > 0 ||
           this.editorLifecycle.activeStatus?.() != null) &&
         Date.now() < deadline
       ) await delay(25);
-      const pendingTotal = this.budget.snapshot().pendingTotal;
+      const budget = this.budget.snapshot();
+      const pendingTotal = budget.pendingTotal;
       const deliveryPending = this.#allDeliveryPending().map((operation) => operation.operationId);
       const leases = this.#publicLeases();
       const editorUse = this.editorLifecycle.activeStatus?.() ?? null;
-      const drained = pendingTotal === 0 && deliveryPending.length === 0 && leases.length === 0 && editorUse == null;
-      const result = { drained, pendingTotal, deliveryPending, leases, editorUse, mutationFences: Object.fromEntries(
+      const drained = pendingTotal === 0 && budget.activeHeavy === 0 &&
+        deliveryPending.length === 0 && leases.length === 0 && editorUse == null;
+      const result = { drained, pendingTotal, budget, deliveryPending, leases, editorUse, mutationFences: Object.fromEntries(
         [...this.unknownByProject].map(([key, values]) => [key, [...values]]),
       ) };
       return textResult(JSON.stringify(result, null, 2), !drained, result);
@@ -2006,6 +2132,17 @@ export class BrokerCore {
           );
         }
       }
+      if (
+        operation.state === OPERATION_STATES.UNKNOWN_OUTCOME
+        && this.budget.hasHeavyHold(args.operationId)
+        && args.confirmNoLongerRunning !== true
+      ) {
+        return textResult(
+          'confirmNoLongerRunning=true is required after independently verifying the timed-out Unity operation is terminal.',
+          true,
+          { code: 'UNKNOWN_HEAVY_TERMINAL_CONFIRMATION_REQUIRED' },
+        );
+      }
       let editorOpenResolution = null;
       if (operation.method === 'unity_router_editor_use' && args.resolution === 'confirmed_completed') {
         const childOperationId = `${args.operationId}:open`;
@@ -2022,6 +2159,7 @@ export class BrokerCore {
         }
       }
       const resolved = await this.journal.markResolved(args.operationId, args.resolution);
+      this.budget.releaseHeavyHold(args.operationId);
       for (const tracker of this.asyncByProject.values()) {
         if (tracker.operationId === args.operationId) this.#releaseAsyncResources(tracker);
       }
@@ -2036,6 +2174,7 @@ export class BrokerCore {
         }
         this.pendingByOperation.delete(editorOpenResolution.operationId);
         this.recoveryFaults.delete(editorOpenResolution.operationId);
+        this.budget.releaseHeavyHold(editorOpenResolution.operationId);
       }
       this.pendingByOperation.delete(args.operationId);
       this.recoveryFaults.delete(args.operationId);
@@ -2543,9 +2682,66 @@ export class BrokerCore {
       startupTimeoutMs: Math.min(this.config.startupTimeoutSec * 1000, timeoutMs),
     };
     await child.start(PROTOCOL_VERSION, clientInfo, requestContext);
+
+    const unavailable = () => {
+      const error = new Error(`Unity lifecycle tool ${name} is absent from the stable catalog`);
+      error.code = 'TOOL_NOT_FOUND';
+      error.toolName = name;
+      return error;
+    };
+
+    // manual-close projects may intentionally carry an older audited compat snapshot that does
+    // not expose the typed handoff tools. Prove absence from one complete, generation-stable
+    // catalog before dispatch so the fallback does not write a spurious missing-command error to
+    // Unity's Console. An invalid, changing, or paginated catalog proves nothing and retains the
+    // existing fail-closed call path below.
+    let lifecycleCatalogPreflightAttempted = false;
+    const cachedCatalog = this.toolRegistry.get(project.key);
+    if (cachedCatalog?.tools?.length > 0 && !cachedCatalog.tools.some((tool) => tool.name === name)) {
+      throw unavailable();
+    }
+    if (!(cachedCatalog?.tools?.length > 0)) {
+      const catalogProcessGeneration = child.processGeneration;
+      const catalogInvalidationEpoch = this.#toolInvalidationEpoch(project.key);
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs > 0) {
+        lifecycleCatalogPreflightAttempted = true;
+        try {
+          const catalogResponse = await child.request(
+            'tools/list',
+            {},
+            Math.min(remainingMs, LIFECYCLE_CATALOG_PROOF_TIMEOUT_MS),
+            {
+              ...requestContext,
+              clientRequestId: `${name}:catalog-preflight`,
+              requireAlreadyStarted: true,
+            },
+          );
+          const stableCatalog = !catalogResponse?.transportFailure
+            && !catalogResponse?.error
+            && catalogResponse?.result?.nextCursor == null
+            && isValidToolCatalog(catalogResponse?.result?.tools)
+            && catalogResponse.result.tools.length > 0
+            && child.processGeneration === catalogProcessGeneration
+            && this.#toolInvalidationEpoch(project.key) === catalogInvalidationEpoch;
+          if (stableCatalog) {
+            this.toolRegistry.update(project.key, catalogResponse.result.tools);
+            if (!catalogResponse.result.tools.some((tool) => tool.name === name)) {
+              throw unavailable();
+            }
+          }
+        } catch (error) {
+          if (error?.code === 'TOOL_NOT_FOUND' && error?.toolName === name) throw error;
+          // Catalog preflight is an optimization, not a weaker safety boundary. Dispatch below so
+          // the existing typed error plus post-error stable-catalog proof remain authoritative.
+        }
+      }
+    }
+
     const processGenerationBefore = child.processGeneration;
     const invalidationEpochBefore = this.#toolInvalidationEpoch(project.key);
-    const response = await child.request('tools/call', { name, arguments: args }, timeoutMs, {
+    const callTimeoutMs = Math.max(1, deadlineAt - Date.now());
+    const response = await child.request('tools/call', { name, arguments: args }, callTimeoutMs, {
       ...requestContext,
       requireAlreadyStarted: true,
     });
@@ -2562,7 +2758,7 @@ export class BrokerCore {
       error.code = response.result?.structuredContent?.code ?? 'EDITOR_LIFECYCLE_TOOL_ERROR';
       error.toolName = name;
       const remainingMs = deadlineAt - Date.now();
-      if (remainingMs > 0) {
+      if (remainingMs > 0 && !lifecycleCatalogPreflightAttempted) {
         try {
           const proofTimeoutMs = Math.min(remainingMs, LIFECYCLE_CATALOG_PROOF_TIMEOUT_MS);
           const catalogResponse = await child.request('tools/list', {}, proofTimeoutMs, {
@@ -2586,6 +2782,36 @@ export class BrokerCore {
       throw error;
     }
     return response.result;
+  }
+
+  async #preflightEditorProject(project) {
+    const unityBin = project.unityBin ?? this.config.unityBin;
+    const timeout = Math.min(30_000, this.config.editorHandoff.startupTimeoutSec * 1_000);
+    let result;
+    try {
+      result = await execFileBounded(unityBin, [
+        ...(this.config.unityArgs ?? []),
+        '--non-interactive',
+        '--format',
+        'json',
+        'projects',
+        'info',
+        project.path,
+      ], {
+        env: this.env,
+        timeout,
+        maxBuffer: 2 * 1024 * 1024,
+        windowsHide: true,
+      });
+    } catch (cause) {
+      throw unityProjectInfoError(
+        'UNITY_HUB_PROJECT_INFO_FAILED',
+        `Unity CLI could not verify the Hub path for "${project.path}" before Editor open`,
+        { stdoutBytes: cause?.stdoutBytes ?? 0, stderrBytes: cause?.stderrBytes ?? 0 },
+        cause,
+      );
+    }
+    return assertExactUnityProjectInfo(result.stdout, project.path);
   }
 
   async #openEditorProject(project) {
@@ -2711,6 +2937,9 @@ export class BrokerCore {
   #addUnknownFence(projectKey, operationId) {
     if (!this.unknownByProject.has(projectKey)) this.unknownByProject.set(projectKey, new Set());
     this.unknownByProject.get(projectKey).add(operationId);
+    if (this.journal.get(operationId)?.reasonCode === UNITY_MAIN_THREAD_TIMEOUT_REASON) {
+      this.budget.holdHeavy(operationId);
+    }
   }
 
   #allDeliveryPending() {
@@ -3269,6 +3498,7 @@ export class BrokerCore {
             message: error?.message ?? String(error),
           }]),
           editors: Object.freeze([]),
+          beeBackends: Object.freeze([]),
         });
       }
       this.auditCache = { checkedAt: Date.now(), value };
@@ -3288,6 +3518,14 @@ export class BrokerCore {
     force = false,
     requireExactActiveEditor = false,
   } = {}) {
+    const heavyHolds = this.budget.listHeavyHolds();
+    if (classification.heavy && heavyHolds.length > 0) {
+      return textResult(
+        'Unity heavy work is globally fenced because a timed-out main-thread operation may still be running.',
+        true,
+        { code: 'GLOBAL_HEAVY_UNKNOWN_OUTCOME_FENCE', operationIds: heavyHolds },
+      );
+    }
     if (this.config.broker.processAuditEnforcement === 'report-only' && !requireExactActiveEditor) {
       return null;
     }
@@ -3307,6 +3545,10 @@ export class BrokerCore {
         return classification.mutation || finding.projectPath == null || finding.projectPath === project.path;
       }
       if (finding.kind === 'legacy_or_unattached_adapter') return classification.mutation;
+      if (
+        finding.kind === 'orphaned_bee_backend'
+        || finding.kind === 'bee_backend_multiple_editor_sessions'
+      ) return classification.mutation;
       return false;
     });
     if (findings.length > 0) {

@@ -1,5 +1,14 @@
 # Unity Pipeline compatibility commands
 
+## Unity 6000.5 build environment
+
+`zamgune_build_environment_status` is a read-only main-thread command. It reports the exact Unity
+and project identity, Editor compile/import/Play readiness, active build target, Android/iOS/macOS
+support, and the Build Profiles and installed platform modules exposed by Unity 6000.5. Build
+Profile `EntityId` values are unsigned decimal strings so JavaScript MCP clients retain all 64 bits.
+Unity 6000.0 through 6000.4 receive the same stable schema with the 6.5-only arrays empty and
+`buildProfileApisAvailable=false`. The command never activates a profile or changes build targets.
+
 ## Single-seat Editor handoff
 
 Use `zamgune_handoff_status` before moving the one active Unity Editor seat to another project. Its

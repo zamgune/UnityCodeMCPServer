@@ -5,6 +5,9 @@
 > Python/uv bridge remains frozen at `0.7.0` only so an existing project can be rolled back while an
 > official-path problem is diagnosed. Never register it beside the managed stable adapter; both
 > processes may attach to the same Editor and invalidate routing and mutation guarantees.
+> The repository's Unity 6.5 development project excludes the frozen legacy asmdefs and bundled DLL
+> importers with `!UNITY_6000_5_OR_NEWER`; legacy rollback validation stays pinned to its pre-6.5
+> Editor environment.
 
 A Python package that bridges MCP (Model Context Protocol) over STDIO to Unity's file-backed transport.
 

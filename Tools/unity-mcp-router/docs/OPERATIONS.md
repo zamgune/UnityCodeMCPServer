@@ -376,6 +376,8 @@ validation 시작 전:
 - finding의 PID/kind/project path를 먼저 확인한다.
 - raw `unity mcp`, source-tree/legacy adapter, duplicate broker를 정상 종료하고 해당 client config를 stable adapter로 바꾼다.
 - 동일 project Editor가 둘이면 하나를 닫는다.
+- `orphaned_bee_backend`이면 Unity를 다시 열지 말고 finding의 PID가 실제로 남은 고아 프로세스인지 먼저 확인한 뒤 정상 종료한다. Router는 PID를 자동 종료하지 않는다.
+- `bee_backend_multiple_editor_sessions`이면 각 `editorPids`의 Editor 작업이 끝났는지 확인하고 한 세션만 남긴다. 한 Editor 아래 여러 Bee PID는 정상이며 finding을 만들지 않는다.
 - `unconfigured_editor` 또는 `editor_project_unknown`이면 Editor를 정상 종료하고 config identity를 확인한 뒤 validation turn으로 exact canonical path handoff를 다시 요청한다. symlink 표기는 floating 2-seat에서도 허용하지 않는다.
 - seat overflow면 entitlement를 확인하기 전 Editor 수를 줄인다.
 - `processAuditEnforcement=report-only`로 우회해 운영하지 않는다.
@@ -406,6 +408,8 @@ validation 시작 전:
    ```
 
 3. project filesystem, Unity Console, Editor/Pipeline status와 실제 side effect를 독립 확인한다.
+   - `reasonCode=UNITY_MAIN_THREAD_TIMEOUT`이면 Unity가 응답 timeout 뒤에도 import/test/build를 계속할 수 있다. 해당 process와 산출물의 terminal 상태를 확인할 때까지 다른 프로젝트의 heavy 작업도 시작하지 않는다.
+   - 이 상태는 `status.budget.heldHeavy > 0`과 `GLOBAL_HEAVY_UNKNOWN_OUTCOME_FENCE`로 보이며 broker 재시작으로 사라지지 않는다. 상태 조회 같은 safe read만 허용된다.
 4. 완료가 확인된 경우에만 stable wrapper로 resolve한다. 완료를 입증할 수 없으면 fence를 유지하고 추가 조사한다.
 
    ```sh
@@ -413,7 +417,7 @@ validation 시작 전:
      operation resolve OPERATION_UUID confirmed_completed
    ```
 
-5. `RUNNING` record를 수동 resolve해야 한다면 status가 terminal이고 실제 process가 끝났음을 확인한 뒤, resolution 바로 다음의 정확한 위치에 `--confirm-no-longer-running`을 추가한다.
+5. `RUNNING` record 또는 `reasonCode=UNITY_MAIN_THREAD_TIMEOUT`인 `UNKNOWN_OUTCOME`를 수동 resolve해야 한다면 status가 terminal이고 실제 process가 끝났음을 확인한 뒤, resolution 바로 다음의 정확한 위치에 `--confirm-no-longer-running`을 추가한다.
 
    ```sh
    /Users/zamgune/.unity-mcp-router/bin/unity-mcp-router-admin \
@@ -457,7 +461,7 @@ id를 stable admin에 직접 전달할 필요는 없다.
 
 ### drain 실패
 
-- drain은 pending queue뿐 아니라 모든 active/orphaned/workspace/async lease와 `deliveryPending`이 0이어야 성공한다.
+- drain은 pending queue뿐 아니라 모든 active/orphaned/workspace/async lease, `deliveryPending`, `budget.heldHeavy`가 0이어야 성공한다.
 - `status`에서 남은 operation/lease owner를 해결한다.
 - maintenance를 취소하면 반드시 `resume`; broker가 drained 상태인지 추측하지 않는다.
 - lease나 operation을 강제로 없애려고 journal/state file을 직접 편집하지 않는다.

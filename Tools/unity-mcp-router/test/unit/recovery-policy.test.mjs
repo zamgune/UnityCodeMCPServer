@@ -49,6 +49,34 @@ test('only safe reads can retry after dispatch and retry budget is bounded', () 
   );
 });
 
+test('scene and Unity 6.5 environment queries are built-in safe reads with one recovery retry', () => {
+  const cases = [
+    'get_scene_hierarchy',
+    'find_gameobjects',
+    'zamgune_build_environment_status',
+  ];
+
+  for (const toolName of cases) {
+    const classification = classifyTool(toolName);
+    assert.equal(classification.source, 'built_in', toolName);
+    assert.equal(classification.kind, TOOL_CLASSES.SAFE_READ, toolName);
+    assert.equal(classification.mutation, false, toolName);
+    assert.equal(classification.heavy, false, toolName);
+    assert.equal(classification.retryableAfterDispatch, true, toolName);
+    assert.equal(isMutationClass(classification.kind), false, toolName);
+    assert.equal(
+      canRetryAfterDispatch(classification, { retriesUsed: 0, safeReadRetries: 1 }),
+      true,
+      toolName,
+    );
+    assert.equal(
+      canRetryAfterDispatch(classification, { retriesUsed: 1, safeReadRetries: 1 }),
+      false,
+      toolName,
+    );
+  }
+});
+
 test('recovery policy supports explicit exact-name overrides', () => {
   const policy = createRecoveryPolicy({
     safeReadRetries: 1,

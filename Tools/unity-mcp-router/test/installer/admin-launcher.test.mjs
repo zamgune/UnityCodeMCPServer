@@ -173,6 +173,13 @@ test('stable admin operation grammar forwards exact immutable deployment argumen
         '--runtime-root', f.release, '--config', path.join(f.deployment, 'config.json'),
       ],
     },
+    {
+      argv: ['workspace', 'resolve', OPERATION_ID, '--confirm'],
+      forwarded: [
+        'workspace', 'resolve', OPERATION_ID, '--confirm',
+        '--runtime-root', f.release, '--config', path.join(f.deployment, 'config.json'),
+      ],
+    },
   ];
 
   for (const entry of accepted) {
@@ -209,6 +216,10 @@ test('stable admin operation grammar forwards exact immutable deployment argumen
     ['call', 'unity_router_operation_status', '{}'],
     ['restart', 'fixture'],
     ['workspace', 'resolve', 'lease-token', '--confirm'],
+    ['workspace', 'resolve', OPERATION_ID],
+    ['workspace', 'resolve', OPERATION_ID, '--force'],
+    ['workspace', 'resolve', OPERATION_ID, '--confirm', '--confirm'],
+    ['workspace', 'status', OPERATION_ID, '--confirm'],
     ['editor'],
     ['editor', 'use'],
     ['editor', 'use', '../SheepWolf'],

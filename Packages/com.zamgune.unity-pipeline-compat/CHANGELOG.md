@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.2] - 2026-08-24
+
+- Added read-only `zamgune_build_environment_status` diagnostics for Unity 6000.5 Build Profiles,
+  string-encoded 64-bit Entity IDs, installed platform modules, and Android/iOS/macOS target support.
+
+## [0.4.1] - 2026-08-23
+
+- Added a Unity 6000.5 API branch that resolves changed asset objects through
+  `ChangeAssetObjectPropertiesEventArgs.entityId` while retaining the Unity 6000.3 and older paths.
+
 ## [0.4.0] - 2026-08-03
 
 - Added `zamgune_handoff_status` with exact project/PID identity, compile/import and Play Mode

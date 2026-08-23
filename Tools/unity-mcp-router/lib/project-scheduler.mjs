@@ -36,6 +36,7 @@ export class SchedulerBudget {
     this.maxHeavyInFlight = positiveInteger(maxHeavyInFlight, 'maxHeavyInFlight');
     this.pendingTotal = 0;
     this.activeHeavy = 0;
+    this.heavyHolds = new Set();
     this.listeners = new Set();
     this.listenerCursor = 0;
   }
@@ -59,7 +60,7 @@ export class SchedulerBudget {
 
   tryStart({ heavy }) {
     if (!heavy) return true;
-    if (this.activeHeavy >= this.maxHeavyInFlight) return false;
+    if (this.activeHeavy + this.heavyHolds.size >= this.maxHeavyInFlight) return false;
     this.activeHeavy += 1;
     return true;
   }
@@ -89,11 +90,37 @@ export class SchedulerBudget {
     return () => this.listeners.delete(listener);
   }
 
+  holdHeavy(operationId) {
+    if (typeof operationId !== 'string' || operationId.length === 0) {
+      throw new TypeError('operationId must be a non-empty string');
+    }
+    const sizeBefore = this.heavyHolds.size;
+    this.heavyHolds.add(operationId);
+    return this.heavyHolds.size !== sizeBefore;
+  }
+
+  releaseHeavyHold(operationId) {
+    if (!this.heavyHolds.delete(operationId)) return false;
+    const listeners = [...this.listeners];
+    for (const listener of listeners) queueMicrotask(listener);
+    return true;
+  }
+
+  hasHeavyHold(operationId) {
+    return this.heavyHolds.has(operationId);
+  }
+
+  listHeavyHolds() {
+    return [...this.heavyHolds].sort();
+  }
+
   snapshot() {
     return Object.freeze({
       pendingTotal: this.pendingTotal,
       maxPendingTotal: this.maxPendingTotal,
-      activeHeavy: this.activeHeavy,
+      activeHeavy: this.activeHeavy + this.heavyHolds.size,
+      runningHeavy: this.activeHeavy,
+      heldHeavy: this.heavyHolds.size,
       maxHeavyInFlight: this.maxHeavyInFlight,
     });
   }

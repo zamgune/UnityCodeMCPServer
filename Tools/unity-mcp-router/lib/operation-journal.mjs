@@ -21,6 +21,7 @@ export const OPERATION_STATE = OPERATION_STATES;
 const FORMAT_VERSION = 2;
 const READABLE_FORMAT_VERSIONS = new Set([1, FORMAT_VERSION]);
 const SHA256 = /^[a-f0-9]{64}$/;
+const REASON_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const FORBIDDEN_RECORD_KEYS = new Set(['payload', 'args', 'arguments', 'params', 'result']);
 const ALLOWED_TRANSITIONS = new Map([
   [OPERATION_STATES.RECEIVED, new Set([OPERATION_STATES.QUEUED, OPERATION_STATES.CANCELLED])],
@@ -62,6 +63,18 @@ function assertSafeLabel(value, field, { optional = false } = {}) {
       'JOURNAL_INVALID_INPUT',
       `${field} must be a non-empty string without control characters`,
       { field },
+    );
+  }
+  return value;
+}
+
+function normalizeReasonCode(value, { optional = true } = {}) {
+  if (value == null && optional) return undefined;
+  if (typeof value !== 'string' || !REASON_CODE.test(value)) {
+    throw new OperationJournalError(
+      'JOURNAL_INVALID_INPUT',
+      'reasonCode must be an uppercase machine-readable identifier',
+      { field: 'reasonCode' },
     );
   }
   return value;
@@ -226,6 +239,9 @@ function replayJournal(text) {
     if (record.state === OPERATION_STATES.RUNNING) {
       assertSafeLabel(record.statusTool, 'statusTool');
     }
+    const reasonCode = record.state === OPERATION_STATES.UNKNOWN_OUTCOME
+      ? normalizeReasonCode(record.reasonCode)
+      : undefined;
     const correlation = record.state === OPERATION_STATES.RUNNING
       ? normalizeCorrelation(record.correlation)
       : undefined;
@@ -239,6 +255,7 @@ function replayJournal(text) {
         statusTool: record.statusTool,
         ...(correlation === undefined ? {} : { correlation }),
       } : {}),
+      ...(reasonCode === undefined ? {} : { reasonCode }),
     });
   }
 
@@ -408,8 +425,11 @@ export class OperationJournal {
     });
   }
 
-  markUnknownOutcome(operationId) {
-    return this.transition(operationId, OPERATION_STATES.UNKNOWN_OUTCOME);
+  markUnknownOutcome(operationId, reasonCode = undefined) {
+    const normalizedReasonCode = normalizeReasonCode(reasonCode);
+    return this.#transition(operationId, OPERATION_STATES.UNKNOWN_OUTCOME, {
+      ...(normalizedReasonCode === undefined ? {} : { reasonCode: normalizedReasonCode }),
+    });
   }
 
   markCancelled(operationId) {
@@ -455,7 +475,13 @@ export class OperationJournal {
     if (this.#fatalError) throw this.#fatalError;
   }
 
-  #transition(operationId, nextState, { recovery, resolution, statusTool, correlation } = {}) {
+  #transition(operationId, nextState, {
+    recovery,
+    resolution,
+    statusTool,
+    correlation,
+    reasonCode,
+  } = {}) {
     assertSafeLabel(operationId, 'operationId');
     if (!ALLOWED_TRANSITIONS.has(nextState)) {
       throw new OperationJournalError('JOURNAL_INVALID_INPUT', `Unknown operation state: ${nextState}`);
@@ -489,6 +515,9 @@ export class OperationJournal {
           statusTool,
           ...(correlation === undefined ? {} : { correlation }),
         } : {}),
+        ...(nextState === OPERATION_STATES.UNKNOWN_OUTCOME && reasonCode !== undefined
+          ? { reasonCode }
+          : {}),
       };
       await this.#appendDurably(event);
       const updated = {
@@ -501,6 +530,9 @@ export class OperationJournal {
           statusTool,
           ...(correlation === undefined ? {} : { correlation }),
         } : {}),
+        ...(nextState === OPERATION_STATES.UNKNOWN_OUTCOME && reasonCode !== undefined
+          ? { reasonCode }
+          : {}),
       };
       this.#operations.set(operationId, updated);
       return cloneOperation(updated);

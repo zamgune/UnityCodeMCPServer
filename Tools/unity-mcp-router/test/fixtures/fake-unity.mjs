@@ -64,6 +64,7 @@ const tools = [
       properties: {
         delayMs: { type: 'number' },
         dropAfterDispatch: { type: 'boolean' },
+        mainThreadTimeout: { type: 'boolean' },
         notifyToolsChanged: { type: 'boolean' },
         notifyPrivate: { type: 'boolean' },
         cancelMode: { type: 'string', enum: ['silent', 'error', 'result', 'ignore'] },
@@ -475,6 +476,15 @@ async function handle(message) {
   if (active?.id === message.id) active = null;
   if (outcome === 'cancelled') return;
   record('call-end', { id: message.id, name, projectPath, marker: args.marker });
+  if (name === 'mutate_once' && args.mainThreadTimeout) {
+    const messageText = 'Main thread operation timed out after 60000ms';
+    result(message.id, {
+      content: [{ type: 'text', text: messageText }],
+      structuredContent: { ok: false, httpStatus: 400, message: messageText },
+      isError: true,
+    });
+    return;
+  }
   if (args.notifyToolsChanged) send({ jsonrpc: '2.0', method: 'notifications/tools/list_changed', params: {} });
   if (args.notifyPrivate) {
     send({

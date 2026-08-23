@@ -525,7 +525,9 @@ namespace Zamgune.UnityPipelineCompat
                     stream.GetChangeAssetObjectPropertiesEvent(
                         index,
                         out ChangeAssetObjectPropertiesEventArgs change);
-#if UNITY_6000_3_OR_NEWER
+#if UNITY_6000_5_OR_NEWER
+                    UnityEngine.Object changedObject = EditorUtility.EntityIdToObject(change.entityId);
+#elif UNITY_6000_3_OR_NEWER
                     UnityEngine.Object changedObject = EditorUtility.EntityIdToObject(change.instanceId);
 #else
                     UnityEngine.Object changedObject = EditorUtility.InstanceIDToObject(change.instanceId);

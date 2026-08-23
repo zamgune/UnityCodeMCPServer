@@ -26,6 +26,9 @@ export const DEFAULT_TOOL_CLASS_BY_NAME = Object.freeze({
   recompile_status: TOOL_CLASSES.SAFE_READ,
   package_status: TOOL_CLASSES.SAFE_READ,
   list_open_scenes: TOOL_CLASSES.SAFE_READ,
+  get_scene_hierarchy: TOOL_CLASSES.SAFE_READ,
+  find_gameobjects: TOOL_CLASSES.SAFE_READ,
+  zamgune_build_environment_status: TOOL_CLASSES.SAFE_READ,
 
   clear_console: TOOL_CLASSES.LIGHT_MUTATION,
   editor_play: TOOL_CLASSES.LIGHT_MUTATION,

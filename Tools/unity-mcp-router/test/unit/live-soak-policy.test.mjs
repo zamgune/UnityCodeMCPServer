@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import test from 'node:test';
 
+import { ROUTER_OPERATION_META_KEY } from '../../lib/mcp-protocol.mjs';
 import {
   CLIENT_NAMES,
   DEFAULT_DURATION_SEC,
@@ -49,15 +50,19 @@ function options(overrides = {}) {
   };
 }
 
-function toolResponse(value, { isError = false } = {}) {
+function toolResponse(value, { isError = false, operation } = {}) {
+  const result = {
+    isError,
+    content: [{ type: 'text', text: isError ? 'redacted fake failure' : 'ok' }],
+    structuredContent: value,
+  };
+  if (operation !== undefined) {
+    result._meta = { [ROUTER_OPERATION_META_KEY]: operation };
+  }
   return {
     jsonrpc: '2.0',
     id: 1,
-    result: {
-      isError,
-      content: [{ type: 'text', text: isError ? 'redacted fake failure' : 'ok' }],
-      structuredContent: value,
-    },
+    result,
   };
 }
 
@@ -414,6 +419,7 @@ test('dry-run fingerprints and prints the exact plan without clients, evidence c
 });
 
 function createFakeHarness({
+  fairnessResponseMutation = null,
   forceReloadDelayMs = 0,
   lateCloseNotification = null,
   nonTargetActiveAtBaseline = false,
@@ -503,19 +509,26 @@ function createFakeHarness({
           failed: false,
           errors: [],
           isCompiling: false,
-          routerOperationState: 'COMPLETED',
-          routerOperationId: 'reload-sync',
-          routerDeliveryAckRequired: true,
+        }, {
+          operation: {
+            routerOperationState: 'COMPLETED',
+            routerOperationId: 'reload-sync',
+            routerDeliveryAckRequired: true,
+          },
         });
       }
       if (name === 'recompile') {
         const dispatchIndex = noopDispatches++;
         const response = toolResponse({
           status: 'up_to_date',
-          routerOperationState: 'COMPLETED',
-          routerOperationId: `noop-${dispatchIndex + 1}`,
-          routerDeliveryAckRequired: true,
+        }, {
+          operation: {
+            routerOperationState: 'COMPLETED',
+            routerOperationId: `noop-${dispatchIndex + 1}`,
+            routerDeliveryAckRequired: true,
+          },
         });
+        fairnessResponseMutation?.(response, dispatchIndex);
         return new Promise((resolve, reject) => {
           pendingFairness.push({
             at: now + 40 * (dispatchIndex + 1),
@@ -784,4 +797,29 @@ test('fairness burst joins every mutation rejection without retry or unhandled r
   assert.equal(fake.telemetry.evidenceRecords.at(-1).mutationDispatches.fairness, 2);
   assert.equal(fake.telemetry.evidenceRecords.at(-1).mutationRetries, 0);
   assert.deepEqual(unhandled, []);
+});
+
+test('fairness burst rejects missing sideband metadata and structured ACK pollution', async (t) => {
+  const scenarios = [
+    {
+      name: 'missing operation metadata',
+      mutate: (response) => { delete response.result._meta[ROUTER_OPERATION_META_KEY]; },
+    },
+    {
+      name: 'structured ACK pollution',
+      mutate: (response) => { response.result.structuredContent.routerDeliveryAckRequired = true; },
+    },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const fake = createFakeHarness({ fairnessResponseMutation: scenario.mutate });
+      await assert.rejects(
+        runSoak(options({ withReload: false, withRestart: false }), fake.runtime),
+        (error) => error instanceof SoakPolicyError && error.code === 'FAIRNESS_OPERATION_METADATA_DRIFT',
+      );
+      assert.equal(fake.telemetry.calls.filter(
+        (entry) => entry.tool === 'recompile' && entry.arguments?.force !== true,
+      ).length, 2);
+    });
+  }
 });

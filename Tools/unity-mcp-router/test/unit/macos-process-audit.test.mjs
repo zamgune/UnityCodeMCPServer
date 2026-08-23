@@ -35,6 +35,7 @@ test('fails closed when the bounded process-table read times out', async () => {
   });
   assert.equal(result.ok, false);
   assert.deepEqual(result.editors, []);
+  assert.deepEqual(result.beeBackends, []);
   assert(result.findings.some((finding) =>
     finding.kind === 'process_audit_failed' && finding.message === 'process audit timed out'));
 });
@@ -75,6 +76,48 @@ test('does not count AssetImportWorker helper processes as additional Editors', 
   });
   assert.equal(result.ok, true);
   assert.deepEqual(result.editors, [{ pid: 100, projectPath: '/ProjectA' }]);
+});
+
+test('allows multiple bee backends owned by one Editor session', () => {
+  const rows = parseProcessTable(`
+  100 1 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/MacOS/Unity -projectPath /ProjectA
+  101 100 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/MacOS/Unity -adb2 -batchMode -name AssetImportWorker0 -projectPath /ProjectA
+  201 100 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/Tools/bee_backend --profile main
+  202 101 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/Tools/bee_backend --profile worker
+  `);
+  const result = auditProcessTable(rows, {
+    configuredProjectPaths: ['/ProjectA'],
+    maxConcurrentEditors: 1,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.beeBackends, [
+    { pid: 201, ppid: 100, editorPid: 100 },
+    { pid: 202, ppid: 101, editorPid: 100 },
+  ]);
+});
+
+test('fails closed for orphaned or cross-Editor bee backends', () => {
+  const orphaned = auditProcessTable(parseProcessTable(`
+  201 1 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/Tools/bee_backend --profile stale
+  `));
+  assert.equal(orphaned.ok, false);
+  assert(orphaned.findings.some((finding) =>
+    finding.kind === 'orphaned_bee_backend' && finding.pids.includes(201)));
+
+  const crossEditor = auditProcessTable(parseProcessTable(`
+  100 1 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/MacOS/Unity -projectPath /ProjectA
+  110 1 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/MacOS/Unity -projectPath /ProjectB
+  201 100 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/Tools/bee_backend --profile a
+  202 110 /Applications/Unity/Hub/Editor/6000.5.9f1/Unity.app/Contents/Tools/bee_backend --profile b
+  `), {
+    configuredProjectPaths: ['/ProjectA', '/ProjectB'],
+    maxConcurrentEditors: 2,
+  });
+  assert.equal(crossEditor.ok, false);
+  assert(crossEditor.findings.some((finding) =>
+    finding.kind === 'bee_backend_multiple_editor_sessions'
+      && finding.editorPids.length === 2));
 });
 
 test('fails closed on non-canonical or unknown Editor project paths even with two seats', () => {

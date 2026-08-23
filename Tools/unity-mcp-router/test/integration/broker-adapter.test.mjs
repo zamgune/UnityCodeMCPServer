@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { JsonRpcLineDecoder, encodeJsonRpcLine } from '../../lib/mcp-framing.mjs';
+import { readRouterOperationMeta } from '../../lib/mcp-protocol.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const ROUTER = path.join(ROOT, 'unity-mcp-router.mjs');
@@ -380,7 +381,27 @@ test('successful recompile refresh is exact, project-scoped, async-aware, and de
   const sync = await clients[0].request('tools/call', {
     name: 'recompile', arguments: { mode: 'sync_success', marker: 'sync-success' },
   });
-  assert.equal(sync.result?.structuredContent?.routerOperationState, 'COMPLETED');
+  assert.deepEqual(sync.result?.content, [{
+    type: 'text',
+    text: JSON.stringify({ status: 'completed', failed: false, errors: [], isCompiling: false }),
+  }]);
+  assert.equal(sync.result?.isError, false);
+  assert.equal(Object.hasOwn(sync.result ?? {}, 'structuredContent'), false);
+  const syncOperation = readRouterOperationMeta(sync.result);
+  assert.equal(typeof syncOperation?.routerOperationId, 'string');
+  assert.deepEqual(syncOperation, {
+    routerOperationId: syncOperation.routerOperationId,
+    routerOperationState: 'COMPLETED',
+    routerDeliveryAckRequired: true,
+  });
+  const completedSync = await waitUntil(async () => {
+    const response = await clients[0].request('tools/call', {
+      name: 'unity_router_operation_status',
+      arguments: { operationId: syncOperation.routerOperationId },
+    });
+    return response.result?.structuredContent?.state === 'COMPLETED' ? response : null;
+  }, { timeoutMs: 5_000, message: 'synchronous operation delivery acknowledgement' });
+  assert.equal(completedSync.result?.structuredContent?.operationId, syncOperation.routerOperationId);
   await assertProjectAOnly();
 
   // The client may immediately rediscover after the synthetic success signal
@@ -453,6 +474,14 @@ test('successful recompile refresh is exact, project-scoped, async-aware, and de
     name: 'recompile', arguments: { mode: 'async_success', delayMs: 40, marker: 'async-success' },
   });
   assert.equal(tracked.result?.structuredContent?.routerOperationState, 'RUNNING');
+  const trackedOperation = readRouterOperationMeta(tracked.result);
+  assert.equal(typeof trackedOperation?.routerOperationId, 'string');
+  assert.deepEqual(trackedOperation, {
+    routerOperationId: tracked.result?.structuredContent?.routerOperationId,
+    routerOperationState: 'RUNNING',
+    routerDeliveryAckRequired: true,
+  });
+  assert.equal(Object.hasOwn(tracked.result?.structuredContent ?? {}, 'routerDeliveryAckRequired'), false);
   assert.deepEqual(clients.map(countChanged), [0, 0, 0]);
   await assertProjectAOnly();
 
@@ -1489,6 +1518,120 @@ test('timed-out mutation quarantines its child and fences the project before lat
   assert.equal(after.result?.isError, false);
   events = await readEvents(harness.stateFile);
   assert.equal(events.filter((event) => event.kind === 'call-start' && event.marker === 'write-after-resolution').length, 1);
+});
+
+test('Unity main-thread timeout survives restart and globally fences heavy work until confirmed terminal', { timeout: 30_000 }, async (t) => {
+  const harness = await createHarness();
+  const clients = [];
+  t.after(async () => {
+    await Promise.allSettled(clients.map((client) => client.close()));
+    await stopBroker(harness);
+    await rm(harness.root, { recursive: true, force: true });
+  });
+
+  const firstA = new StdioMcpClient({
+    configPath: harness.configPath,
+    defaultProject: 'a',
+    env: harness.env,
+    admin: true,
+  });
+  const firstB = new StdioMcpClient({
+    configPath: harness.configPath,
+    defaultProject: 'b',
+    env: harness.env,
+  });
+  clients.push(firstA, firstB);
+  await Promise.all([firstA.initialize(), firstB.initialize()]);
+  await Promise.all([firstA.request('tools/list'), firstB.request('tools/list')]);
+
+  const timedOut = await firstA.request('tools/call', {
+    name: 'mutate_once',
+    arguments: { mainThreadTimeout: true, marker: 'unity-main-thread-timeout' },
+  });
+  assert.equal(timedOut.result?.isError, true);
+  assert.equal(
+    timedOut.result?.structuredContent?.code,
+    'UNITY_MAIN_THREAD_TIMEOUT_UNKNOWN_OUTCOME',
+  );
+  assert.equal(timedOut.result?.structuredContent?.reasonCode, 'UNITY_MAIN_THREAD_TIMEOUT');
+  assert.equal(timedOut.result?.structuredContent?.timeoutMs, 60_000);
+  const operationId = timedOut.result?.structuredContent?.operationId;
+  assert.equal(typeof operationId, 'string');
+
+  let status = await firstA.request('tools/call', {
+    name: 'unity_router_status', arguments: {},
+  });
+  assert.equal(status.result?.structuredContent?.budget?.activeHeavy, 1);
+  assert.equal(status.result?.structuredContent?.budget?.runningHeavy, 0);
+  assert.equal(status.result?.structuredContent?.budget?.heldHeavy, 1);
+  assert.equal(
+    status.result?.structuredContent?.unknownOutcomes?.find((entry) => entry.operationId === operationId)?.reasonCode,
+    'UNITY_MAIN_THREAD_TIMEOUT',
+  );
+
+  const blockedAcrossProjects = await firstB.request('tools/call', {
+    name: 'mutate_once', arguments: { marker: 'globally-blocked-heavy' },
+  });
+  assert.equal(
+    blockedAcrossProjects.result?.structuredContent?.code,
+    'GLOBAL_HEAVY_UNKNOWN_OUTCOME_FENCE',
+  );
+  const readDuringHold = await firstB.request('tools/call', {
+    name: 'editor_status', arguments: { marker: 'safe-read-during-global-hold' },
+  });
+  assert.equal(readDuringHold.result?.isError, false);
+
+  await Promise.all([firstA.close(), firstB.close()]);
+  await stopBroker(harness);
+
+  const restartedA = new StdioMcpClient({
+    configPath: harness.configPath,
+    defaultProject: 'a',
+    env: harness.env,
+    admin: true,
+  });
+  const restartedB = new StdioMcpClient({
+    configPath: harness.configPath,
+    defaultProject: 'b',
+    env: harness.env,
+  });
+  clients.push(restartedA, restartedB);
+  await Promise.all([restartedA.initialize(), restartedB.initialize()]);
+  await Promise.all([restartedA.request('tools/list'), restartedB.request('tools/list')]);
+
+  status = await restartedA.request('tools/call', {
+    name: 'unity_router_status', arguments: {},
+  });
+  assert.equal(status.result?.structuredContent?.budget?.activeHeavy, 1);
+  assert.equal(status.result?.structuredContent?.budget?.heldHeavy, 1);
+
+  const unconfirmed = await restartedA.request('tools/call', {
+    name: 'unity_router_operation_resolve',
+    arguments: { operationId, resolution: 'confirmed_completed' },
+  });
+  assert.equal(
+    unconfirmed.result?.structuredContent?.code,
+    'UNKNOWN_HEAVY_TERMINAL_CONFIRMATION_REQUIRED',
+  );
+  const resolved = await restartedA.request('tools/call', {
+    name: 'unity_router_operation_resolve',
+    arguments: {
+      operationId,
+      resolution: 'confirmed_completed',
+      confirmNoLongerRunning: true,
+    },
+  });
+  assert.equal(resolved.result?.structuredContent?.state, 'RESOLVED');
+
+  status = await restartedA.request('tools/call', {
+    name: 'unity_router_status', arguments: {},
+  });
+  assert.equal(status.result?.structuredContent?.budget?.activeHeavy, 0);
+  assert.equal(status.result?.structuredContent?.budget?.heldHeavy, 0);
+  const afterResolution = await restartedB.request('tools/call', {
+    name: 'mutate_once', arguments: { marker: 'after-global-hold-resolution' },
+  });
+  assert.equal(afterResolution.result?.isError, false);
 });
 
 test('post-dispatch cancellation is ordered and fences only an ambiguous mutation outcome', { timeout: 25_000 }, async (t) => {

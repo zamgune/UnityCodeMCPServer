@@ -103,6 +103,11 @@ function isUnityEditor(command) {
   return /Unity\.app\/Contents\/MacOS\/Unity$/.test(words[0] ?? '');
 }
 
+function isBeeBackend(command) {
+  const executable = executableName(commandWords(command)).toLowerCase();
+  return executable === 'bee_backend' || executable === 'bee_backend.exe';
+}
+
 function isBrokerDaemon(command) {
   const words = commandWords(command);
   return path.basename(nodeScript(words) ?? '') === 'broker-daemon.mjs' ||
@@ -127,6 +132,19 @@ function isUnityEditorHelper(command) {
     /(?:^|\s)-name(?:\s+|=)(?:"|')?(?:AssetImportWorker\d*|AssetImport)(?:"|'|\s|$)/i.test(command);
 }
 
+function findAncestorEditorPid(proc, processByPid, editorPids) {
+  const visited = new Set([proc.pid]);
+  let ancestorPid = proc.ppid;
+  while (Number.isSafeInteger(ancestorPid) && ancestorPid > 0 && !visited.has(ancestorPid)) {
+    if (editorPids.has(ancestorPid)) return ancestorPid;
+    visited.add(ancestorPid);
+    const ancestor = processByPid.get(ancestorPid);
+    if (!ancestor) break;
+    ancestorPid = ancestor.ppid;
+  }
+  return null;
+}
+
 export function auditProcessTable(processes, {
   brokerPid = process.pid,
   childPids = [],
@@ -137,8 +155,10 @@ export function auditProcessTable(processes, {
   const managedChildren = new Set(childPids.filter(Number.isSafeInteger));
   const managedAdapters = new Set(adapterPids.filter(Number.isSafeInteger));
   const configured = new Set(configuredProjectPaths.map((value) => path.resolve(value)));
+  const processByPid = new Map(processes.map((proc) => [proc.pid, proc]));
   const findings = [];
   const editors = [];
+  const beeProcesses = [];
 
   for (const proc of processes) {
     if (proc.pid !== brokerPid && isBrokerDaemon(proc.command)) {
@@ -158,6 +178,35 @@ export function auditProcessTable(processes, {
     if (isUnityEditor(proc.command) && !isUnityEditorHelper(proc.command)) {
       editors.push({ pid: proc.pid, projectPath: projectArgument(proc.command) });
     }
+    if (isBeeBackend(proc.command)) beeProcesses.push(proc);
+  }
+
+  const editorPids = new Set(editors.map((editor) => editor.pid));
+  const beeBackends = beeProcesses.map((proc) => Object.freeze({
+    pid: proc.pid,
+    ppid: proc.ppid,
+    editorPid: findAncestorEditorPid(proc, processByPid, editorPids),
+  }));
+  const orphanedBeePids = beeBackends
+    .filter((bee) => bee.editorPid == null)
+    .map((bee) => bee.pid);
+  if (orphanedBeePids.length > 0) {
+    findings.push({
+      severity: 'error',
+      kind: 'orphaned_bee_backend',
+      pids: orphanedBeePids,
+    });
+  }
+  const beeEditorPids = [...new Set(beeBackends
+    .map((bee) => bee.editorPid)
+    .filter(Number.isSafeInteger))];
+  if (beeEditorPids.length > 1) {
+    findings.push({
+      severity: 'error',
+      kind: 'bee_backend_multiple_editor_sessions',
+      editorPids: beeEditorPids,
+      pids: beeBackends.map((bee) => bee.pid),
+    });
   }
 
   const byProject = new Map();
@@ -192,6 +241,7 @@ export function auditProcessTable(processes, {
     ok: !findings.some((finding) => finding.severity === 'error'),
     findings: Object.freeze(findings),
     editors: Object.freeze(editors),
+    beeBackends: Object.freeze(beeBackends),
   });
 }
 
@@ -226,6 +276,7 @@ export async function auditSystemProcesses(options = {}, {
       ok: false,
       findings: Object.freeze([{ severity: 'error', kind: 'process_audit_failed', message: error.message }]),
       editors: Object.freeze([]),
+      beeBackends: Object.freeze([]),
     });
   }
 }

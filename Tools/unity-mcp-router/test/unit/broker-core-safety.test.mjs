@@ -5,12 +5,43 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { BrokerCore, catalogProvesToolAbsent, isValidToolCatalog } from '../../lib/broker-core.mjs';
+import {
+  BrokerCore,
+  ambiguousUnityExecutionTimeout,
+  assertExactUnityProjectInfo,
+  catalogProvesToolAbsent,
+  isValidToolCatalog,
+} from '../../lib/broker-core.mjs';
 import { normalizeConfig } from '../../lib/config.mjs';
+import { readRouterOperationMeta } from '../../lib/mcp-protocol.mjs';
 import { OperationJournal } from '../../lib/operation-journal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const FAKE_UNITY = path.join(ROOT, 'test/fixtures/fake-unity.mjs');
+
+test('Unity project-info preflight accepts only the exact configured Hub path', () => {
+  assert.deepEqual(
+    assertExactUnityProjectInfo(JSON.stringify({
+      success: true,
+      data: { path: '/Volumes/Work/Game' },
+    }), '/Volumes/Work/Game'),
+    {
+      expectedProjectPath: '/Volumes/Work/Game',
+      observedProjectPath: '/Volumes/Work/Game',
+    },
+  );
+  assert.throws(
+    () => assertExactUnityProjectInfo(JSON.stringify({
+      success: true,
+      data: { path: '/Users/dev/GameAlias' },
+    }), '/Volumes/Work/Game'),
+    { code: 'UNITY_HUB_PROJECT_PATH_MISMATCH' },
+  );
+  assert.throws(
+    () => assertExactUnityProjectInfo('{not-json', '/Volumes/Work/Game'),
+    { code: 'UNITY_HUB_PROJECT_INFO_INVALID' },
+  );
+});
 
 test('lifecycle catalog absence proof requires one complete non-empty valid catalog', () => {
   const editorStatus = {
@@ -125,6 +156,38 @@ test('tool catalog shape requires unique non-empty names and object input schema
   assert.equal(isValidToolCatalog([{ ...valid, inputSchema: null }]), false);
   assert.equal(isValidToolCatalog([valid, { ...valid }]), false);
   assert.equal(isValidToolCatalog([{ ...valid, outputSchema: [] }]), false);
+});
+
+test('main-thread timeout detection requires an error-shaped Unity response', () => {
+  const errorResponse = {
+    result: {
+      content: [{ type: 'text', text: 'Main thread operation timed out after 60000ms' }],
+      structuredContent: {
+        ok: false,
+        httpStatus: 400,
+        message: 'Main thread operation timed out after 60000ms',
+      },
+      isError: true,
+    },
+  };
+  assert.deepEqual(ambiguousUnityExecutionTimeout(errorResponse), {
+    reasonCode: 'UNITY_MAIN_THREAD_TIMEOUT',
+    timeoutMs: 60_000,
+    httpStatus: 400,
+  });
+  assert.equal(ambiguousUnityExecutionTimeout({
+    result: {
+      content: errorResponse.result.content,
+      structuredContent: { ok: true },
+      isError: false,
+    },
+  }), null);
+  assert.equal(ambiguousUnityExecutionTimeout({
+    result: {
+      content: [{ type: 'text', text: 'ordinary validation failed' }],
+      isError: true,
+    },
+  }), null);
 });
 
 function controllableProjectAccessAuditor(config, { allowed = false } = {}) {
@@ -455,7 +518,7 @@ test('single-seat process audit failure blocks child startup with a typed error'
   assert.equal(core.children.size, 0);
 });
 
-test('manual same-target handoff falls back when official MCP reports a missing typed tool as isError', async (t) => {
+test('manual same-target handoff proves an absent typed tool before dispatch and falls back cleanly', async (t) => {
   const harness = await fixture(t, {
     license: { mode: 'single-seat', maxConcurrentEditors: 1 },
   });
@@ -493,7 +556,7 @@ test('manual same-target handoff falls back when official MCP reports a missing 
   const events = (await readFile(harness.stateFile, 'utf8'))
     .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
   assert.equal(events.filter((event) => event.kind === 'call-start' &&
-    event.name === 'zamgune_handoff_status').length, 1);
+    event.name === 'zamgune_handoff_status').length, 0);
   assert.equal(events.filter((event) => event.kind === 'call-start' &&
     event.name === 'editor_status').length, 1);
   assert.equal(events.filter((event) => event.kind === 'tools-list').length, 1);
@@ -1129,6 +1192,60 @@ test('cancellation received while lifecycle recovery is pending cannot overtake 
   assert.equal(core.children.size, 0);
 });
 
+test('early tools/call cancellation returns a non-dispatched tool result after lifecycle recovery', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const recoveryGate = deferred();
+  const editorLifecycle = {
+    ...fakeEditorLifecycle(harness.config),
+    ready: () => recoveryGate.promise,
+  };
+  const messages = [];
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    editorLifecycle,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => CLEAN_AUDIT,
+    toolRefreshIntervalMs: 0,
+  });
+  t.after(() => core.close());
+  const connection = core.attach({
+    clientId: 'early-tool-cancel-client',
+    sessionNonce: 'early-tool-cancel-session',
+    defaultProject: 'A',
+    clientKind: 'unit-test',
+    send: (message) => messages.push(message),
+  });
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+  });
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', method: 'notifications/initialized', params: {},
+  });
+
+  const pending = core.handle(connection.id, {
+    jsonrpc: '2.0', id: 7004, method: 'tools/call',
+    params: { name: 'mutate_once', arguments: { marker: 'must-not-dispatch' } },
+  });
+  await waitUntil(() => connection.incomingRequests.size === 1);
+  await core.handle(connection.id, {
+    jsonrpc: '2.0', method: 'notifications/cancelled',
+    params: { requestId: 7004, reason: 'cancel during recovery' },
+  });
+  recoveryGate.resolve();
+  await pending;
+
+  const cancelled = messages.find((message) => message.id === 7004);
+  assert.equal(cancelled?.result?.structuredContent?.state, 'CANCELLED');
+  assert.equal(cancelled?.result?.structuredContent?.code, 'NOT_DISPATCHED');
+  assert.equal(cancelled?.result?.isError, true);
+  assert.equal(connection.incomingRequests.size, 0);
+  assert.equal(connection.earlyCancellations.size, 0);
+  assert.equal(core.children.size, 0);
+});
+
 test('disconnect during lifecycle recovery cannot execute a stale admin request', async (t) => {
   const harness = await fixture(t, {
     license: { mode: 'single-seat', maxConcurrentEditors: 1 },
@@ -1316,7 +1433,7 @@ test('a known catalog stays invalidated when reload recovery exceeds its empty g
     name: 'recompile',
     arguments: { mode: 'sync_success', notifyToolsChanged: true, marker: 'catalog-recovery-timeout' },
   });
-  const operationId = recompile.result?.structuredContent?.routerOperationId;
+  const operationId = readRouterOperationMeta(recompile.result)?.routerOperationId;
   assert.equal(typeof operationId, 'string');
   await core.acknowledgeResponse(client.clientId, { operationId, requestId: 3 });
 
@@ -1374,7 +1491,7 @@ test('a first post-invalidation discovery error is fail-closed as catalog recove
     name: 'recompile',
     arguments: { mode: 'sync_success', notifyToolsChanged: true, marker: 'catalog-error-recovery' },
   });
-  const operationId = recompile.result?.structuredContent?.routerOperationId;
+  const operationId = readRouterOperationMeta(recompile.result)?.routerOperationId;
   assert.equal(typeof operationId, 'string');
   await core.acknowledgeResponse(clients[0].clientId, { operationId, requestId: 12 });
   assert.deepEqual(clients.map((client) => client.messages.filter((message) =>
@@ -1451,6 +1568,33 @@ test('enforced process audit blocks a bypass before dispatch and recovers after 
   core.auditCache = null;
   const allowed = await client.request(3, 'tools/call', { name: 'mutate_once', arguments: { marker: 'allowed' } });
   assert.equal(allowed.result?.isError, false);
+});
+
+test('enforced process audit blocks mutation while an orphaned Unity 6.5 bee backend exists', async (t) => {
+  const harness = await fixture(t);
+  const journal = await OperationJournal.open(harness.config.broker.journalFile);
+  const core = new BrokerCore({
+    config: harness.config,
+    journal,
+    env: { ...process.env, FAKE_UNITY_STATE_FILE: harness.stateFile, FAKE_UNITY_VERSION: '1.0.0-beta.3' },
+    processAuditor: async () => ({
+      ok: false,
+      findings: [{ severity: 'error', kind: 'orphaned_bee_backend', pids: [992] }],
+      editors: [],
+      beeBackends: [{ pid: 992, ppid: 1, editorPid: null }],
+    }),
+  });
+  t.after(() => core.close());
+  const client = attach(core, 'A');
+  await client.request(1, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' },
+  });
+
+  const blocked = await client.request(2, 'tools/call', {
+    name: 'mutate_once', arguments: { marker: 'blocked-by-bee-audit' },
+  });
+  assert.equal(blocked.result?.structuredContent?.code, 'SYSTEM_CONCURRENCY_UNSAFE');
+  assert.equal(blocked.result?.structuredContent?.findings?.[0]?.kind, 'orphaned_bee_backend');
 });
 
 test('concurrent forced process audits coalesce one fresh follow-up without overlap', async (t) => {
@@ -1660,7 +1804,7 @@ test('a completed mutation whose response is dropped before adapter ACK becomes 
     defaultProject: 'A',
     clientKind: 'unit-test',
     send: (message) => {
-      const metadata = message?.result?.structuredContent;
+      const metadata = readRouterOperationMeta(message?.result);
       if (message.id === 2 && metadata?.routerDeliveryAckRequired === true) {
         droppedOperationId = metadata.routerOperationId;
         core.detach('delivery-victim');

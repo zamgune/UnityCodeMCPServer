@@ -293,6 +293,24 @@ test('broker-admin forwards only bounded editor use and status shapes', async (t
   assert.equal(attaches.length, cases.length);
 });
 
+test('broker-admin forwards only the confirmed canonical workspace resolution shape', async (t) => {
+  const { config, attaches, calls } = await toolCaptureFixture(t);
+  const result = await runAdmin([
+    'workspace', 'resolve', OPERATION_ID, '--confirm',
+    '--runtime-root', ROOT, '--config', config,
+  ]);
+
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  const payload = JSON.parse(result.stdout.trim());
+  assert.equal(payload.command, 'workspace');
+  assert.equal(payload.action, 'resolve');
+  assert.deepEqual(calls, [{
+    name: 'unity_router_workspace_resolve',
+    arguments: { leaseToken: OPERATION_ID, confirm: true },
+  }]);
+  assert.equal(attaches.length, 1);
+});
+
 test('broker-admin rejects malformed UUIDs, broader resolutions, pass-through, and reordered operation argv', () => {
   const internal = ['--runtime-root', ROOT, '--config', '/not/read/for/rejected-argv.json'];
   const rejected = [
@@ -300,6 +318,11 @@ test('broker-admin rejects malformed UUIDs, broader resolutions, pass-through, a
     ['call', 'unity_router_operation_status', '{}', ...internal],
     ['restart', 'fixture', ...internal],
     ['workspace', 'resolve', 'lease-token', '--confirm', ...internal],
+    ['workspace', 'resolve', OPERATION_ID, ...internal],
+    ['workspace', 'resolve', OPERATION_ID, '--force', ...internal],
+    ['workspace', 'resolve', OPERATION_ID, '--confirm', '--confirm', ...internal],
+    ['workspace', 'status', OPERATION_ID, '--confirm', ...internal],
+    ['workspace', 'resolve', OPERATION_ID, '--confirm', '--config', '/tmp/config', '--runtime-root', ROOT],
     ['editor', ...internal],
     ['editor', 'use', ...internal],
     ['editor', 'status', 'op-1', ...internal],
