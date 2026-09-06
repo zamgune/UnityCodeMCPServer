@@ -14,9 +14,9 @@ rollback only. They are not part of the normal automation path.
 
 | Component | Version | Role |
 | --- | --- | --- |
-| Unity Editor | `6000.5.9f1` | Current development and promotion host |
-| Unity CLI | `1.0.0-beta.6` | Official CLI and MCP child process |
-| `com.unity.pipeline` | `0.5.0-exp.1` | Official Editor command surface |
+| Unity Editor | `6000.6.0f1` | Current development and promotion host |
+| Unity CLI | `1.0.0-beta.8` | Official CLI and MCP child process |
+| `com.unity.pipeline` | `0.6.0-exp.1` | Official Editor command surface |
 | `com.zamgune.unity-pipeline-compat` | `0.4.2` candidate | Prior commands plus Unity 6.5 build-environment diagnostics and fail-closed single-seat Editor handoff |
 | Input System | `1.19.0` | Named InputAction injection |
 | `Tools/unity-mcp-router` | `2.0.0-dev` | LaunchAgent broker, adapters, leases, journal, install and rollback |
@@ -79,7 +79,7 @@ For the validated project baseline, install Pipeline explicitly:
 unity auth login
 unity pipeline install \
   --project-path "/absolute/path/to/UnityProject" \
-  --package-version 0.5.0-exp.1
+  --package-version 0.6.0-exp.1
 ```
 
 Do not commit a moving Git dependency for the compatibility package. This repository embeds the

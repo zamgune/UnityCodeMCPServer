@@ -229,3 +229,14 @@ replacement, Inspector enforcement, folder moves, Play Mode transitions, timed g
 focus behavior, and final-composited Game View capture.
 
 See [Documentation~/index.md](Documentation~/index.md) for lifecycle and failure semantics.
+
+## Local Pipeline 0.6 compatibility
+
+The development project resolves Pipeline `0.6.0-exp.1` with Unity CLI `1.0.0-beta.8`.
+`PipelineApiBridge` checks the upstream internal type and cache contracts and preserves the existing
+startup/settings gates and protected-command uniqueness rules. Unsupported reflection contracts stop
+the Pipeline bootstrap; they do not silently expose duplicate test or recompile commands.
+Pipeline 0.6 resets discovery after Play Mode. The compatibility installer republishes and verifies
+the filtered registry on both EnteredPlayMode and EnteredEditMode. The explicit
+`PipelineApiBridgeTests.ProtectedCommandsSurviveTenFastPlayCycles` checks every transition.
+Run it only on a saved validation scene after protecting the project runtime saves.

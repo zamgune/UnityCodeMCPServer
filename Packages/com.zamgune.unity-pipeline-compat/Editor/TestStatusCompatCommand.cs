@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using Newtonsoft.Json.Linq;
 using Unity.Pipeline.Commands;
-using Unity.Pipeline.Editor.Commands;
 
 namespace Zamgune.UnityPipelineCompat
 {
@@ -25,7 +24,7 @@ namespace Zamgune.UnityPipelineCompat
                 "no_tests"
             };
 
-        internal static Func<string> ReadOfficialStatus = TestCommands.GetTestStatus;
+        internal static Func<string> ReadOfficialStatus = PipelineApiBridge.TestStatus;
         internal static Func<bool> HasPendingRequest =
             () => File.Exists("Temp/pipeline_test_request.json");
 
@@ -121,7 +120,7 @@ namespace Zamgune.UnityPipelineCompat
 
         internal static void ResetTestHooks()
         {
-            ReadOfficialStatus = TestCommands.GetTestStatus;
+            ReadOfficialStatus = PipelineApiBridge.TestStatus;
             HasPendingRequest = () => File.Exists("Temp/pipeline_test_request.json");
         }
 

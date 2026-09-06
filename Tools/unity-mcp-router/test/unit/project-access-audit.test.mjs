@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   mkdirSync,
@@ -223,4 +224,63 @@ test('keeps a timed-out probe quarantined and applies the global active-probe ca
 
   children[0].emit('close', null, 'SIGKILL');
   assert.equal(auditor.snapshot().activeProbes, 0);
+});
+
+
+test('audits fourteen configured projects without exceeding the eight-probe limit', async (t) => {
+  const projects = Array.from({ length: 14 }, (_, i) => unityProject(t, `Project ${i}`));
+  let active = 0;
+  let peak = 0;
+  let spawned = 0;
+  const auditor = new ProjectAccessAuditor({
+    projects,
+    maxActiveProbes: 8,
+    spawnProcess: (...args) => {
+      const child = spawn(...args);
+      spawned += 1;
+      active += 1;
+      peak = Math.max(peak, active);
+      child.once('close', () => { active -= 1; });
+      return child;
+    },
+  });
+  t.after(() => auditor.close());
+
+  const result = await auditor.auditAll();
+  assert.equal(result.ok, true);
+  assert.equal(result.projects.length, 14);
+  assert.deepEqual(result.projects.map((item) => item.projectPath), projects.map((item) => item.path));
+  assert(result.projects.every((item) => item.code === 'PROJECT_ACCESS_OK'));
+  assert.equal(spawned, 14);
+  assert(peak <= 8);
+  assert.equal(result.activeProbes, 0);
+});
+
+test('bulk auditing preserves caller deadlines and does not spawn later batches after expiry', async (t) => {
+  const projects = Array.from({ length: 3 }, (_, i) => unityProject(t, `Deadline ${i}`));
+  const children = [];
+  const auditor = new ProjectAccessAuditor({
+    projects,
+    maxActiveProbes: 1,
+    timeoutMs: 1000,
+    spawnProcess: () => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = () => true;
+      children.push(child);
+      return child;
+    },
+  });
+  t.after(async () => {
+    for (const child of children) child.emit('close', null, 'SIGKILL');
+    await auditor.close();
+  });
+
+  const result = await auditor.auditAll(projects, { deadlineAt: Date.now() + 30 });
+  assert.equal(result.ok, false);
+  assert.equal(result.projects.length, 3);
+  assert(result.projects.every((item) => item.code === 'DEADLINE_EXCEEDED'));
+  assert.equal(children.length, 1);
+  assert.equal(auditor.snapshot().activeProbes, 1, 'caller expiry must not forget the live helper');
 });

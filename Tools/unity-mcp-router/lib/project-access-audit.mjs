@@ -372,8 +372,14 @@ export class ProjectAccessAuditor {
   }
 
   async auditAll(projects = this.projects, { force = true, deadlineAt } = {}) {
-    const results = await Promise.all(projects.map((project) =>
-      this.audit(project, { force, deadlineAt })));
+    const results = [];
+    // Audit every configured project without exhausting the bounded helper pool.
+    // Stalled helpers remain quarantined and still count against the global cap.
+    for (let start = 0; start < projects.length; start += this.maxActiveProbes) {
+      const batch = projects.slice(start, start + this.maxActiveProbes);
+      results.push(...await Promise.all(batch.map((project) =>
+        this.audit(project, { force, deadlineAt }))));
+    }
     return {
       ok: results.every((result) => result.ok),
       responsibleExecutable: this.executable,

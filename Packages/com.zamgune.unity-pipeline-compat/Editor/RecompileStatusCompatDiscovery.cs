@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using Unity.Pipeline.Commands;
 using Unity.Pipeline.Editor;
 using UnityEditor;
@@ -16,7 +15,7 @@ namespace Zamgune.UnityPipelineCompat
     /// duplicate or upstream identity change disables all four protected commands instead of
     /// exposing an ambiguous or transport-incompatible contract.
     /// </summary>
-    internal sealed class RecompileStatusCompatDiscovery : ICommandDiscovery
+    internal sealed class RecompileStatusCompatDiscovery : ICompatCommandDiscovery
     {
         internal const string RecompileCommandName = "recompile";
         internal const string StatusCommandName = "recompile_status";
@@ -29,9 +28,9 @@ namespace Zamgune.UnityPipelineCompat
         internal const string OfficialRunTestsMethodName = "RunTests";
         internal const string OfficialTestStatusMethodName = "GetTestStatus";
 
-        private readonly ICommandDiscovery _inner;
+        private readonly ICompatCommandDiscovery _inner;
 
-        internal RecompileStatusCompatDiscovery(ICommandDiscovery inner)
+        internal RecompileStatusCompatDiscovery(ICompatCommandDiscovery inner)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         }
@@ -218,14 +217,14 @@ namespace Zamgune.UnityPipelineCompat
             }
 
             string path = AssetDatabase.GUIDToAssetPath(guids[0]);
-            EditorPipelineManager manager = AssetDatabase.LoadAssetAtPath<EditorPipelineManager>(path);
+            UnityEngine.Object manager = PipelineApiBridge.LoadSettings(path);
             if (manager == null)
             {
                 error = $"Unable to load the EditorPipelineManager settings asset at {path}.";
                 return false;
             }
 
-            if (manager.AutoStart)
+            if (PipelineApiBridge.AutoStart(manager))
             {
                 error = $"EditorPipelineManager at {path} must have AutoStart disabled.";
                 return false;
@@ -442,6 +441,30 @@ namespace Zamgune.UnityPipelineCompat
             CompletePhaseA();
             ObjectChangeEvents.changesPublished -= OnObjectChangesPublished;
             ObjectChangeEvents.changesPublished += OnObjectChangesPublished;
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+        }
+
+        private static void OnPlayModeStateChanged(PlayModeStateChange state)
+        {
+            if (s_State != RecompileStatusCompatBootstrapState.RunningCompat ||
+                (state != PlayModeStateChange.EnteredEditMode && state != PlayModeStateChange.EnteredPlayMode))
+                return;
+
+            // Pipeline 0.6 resets discovery on return to Edit Mode, even without a domain
+            // reload. Restore the exact protected-command invariant before accepting work.
+            try
+            {
+                var discovery = new RecompileStatusCompatDiscovery(new CompatTypeCacheCommandDiscovery());
+                PipelineApiBridge.SetDiscovery(discovery);
+                if (!RecompileStatusCompatStartupGate.TryValidateDiscoveryPostcondition(
+                        discovery, PipelineApiBridge.DiscoverCommands(), out string error))
+                    FailPhaseB(error);
+            }
+            catch (Exception exception)
+            {
+                FailPhaseB($"Play transition compatibility refresh failed: {exception.Message}");
+            }
         }
 
         internal static void OnAssetsPostprocessed(
@@ -540,7 +563,7 @@ namespace Zamgune.UnityPipelineCompat
 
                     if (!RecompileStatusCompatBootstrapPolicy.IsRelevantObjectPropertyChange(
                             true,
-                            changedObject is EditorPipelineManager,
+                            PipelineApiBridge.IsSettingsObject(changedObject),
                             KnownSettingsGuids.Contains(guid),
                             guidResolvesToManager))
                     {
@@ -645,10 +668,10 @@ namespace Zamgune.UnityPipelineCompat
 
                 ReplaceKnownSettingsPaths(discoveredSettingsPaths);
 
-                var discovery = new RecompileStatusCompatDiscovery(new TypeCacheCommandDiscovery());
-                CommandRegistry.SetDiscovery(discovery);
+                var discovery = new RecompileStatusCompatDiscovery(new CompatTypeCacheCommandDiscovery());
+                PipelineApiBridge.SetDiscovery(discovery);
 
-                CommandInfo[] commands = CommandRegistry.DiscoverCommands().ToArray();
+                CommandInfo[] commands = PipelineApiBridge.DiscoverCommands().ToArray();
                 if (!RecompileStatusCompatStartupGate.TryValidateDiscoveryPostcondition(
                         discovery,
                         commands,
@@ -658,7 +681,7 @@ namespace Zamgune.UnityPipelineCompat
                     return;
                 }
 
-                PipelineServerStartup.EnsureServerStarted();
+                PipelineApiBridge.StartServer();
                 if (!IsPipelineServerRunning())
                 {
                     FailPhaseB(
@@ -681,7 +704,7 @@ namespace Zamgune.UnityPipelineCompat
 
         private static bool IsPipelineServerRunning()
         {
-            return PipelineServerStartup.Server != null && PipelineServerStartup.Server.IsRunning;
+            return PipelineApiBridge.IsServerRunning;
         }
 
         private static bool IsEditorPipelineManagerAsset(string path)
@@ -691,7 +714,7 @@ namespace Zamgune.UnityPipelineCompat
                 return false;
             }
 
-            return AssetDatabase.LoadAssetAtPath<EditorPipelineManager>(path) != null;
+            return PipelineApiBridge.LoadSettings(path) != null;
         }
 
         private static bool IsFolderContainingEditorPipelineManager(string path)
@@ -760,7 +783,7 @@ namespace Zamgune.UnityPipelineCompat
             {
                 try
                 {
-                    RuntimeHelpers.RunClassConstructor(typeof(PipelineServerStartup).TypeHandle);
+                    PipelineApiBridge.InitializeStartup();
                 }
                 catch (Exception exception)
                 {
@@ -770,7 +793,7 @@ namespace Zamgune.UnityPipelineCompat
 
             try
             {
-                PipelineServerStartup.StopServer();
+                PipelineApiBridge.StopServer();
             }
             catch (Exception exception)
             {
@@ -781,10 +804,10 @@ namespace Zamgune.UnityPipelineCompat
             {
                 // Keep every unrelated Pipeline command, but expose none of the protected test or
                 // recompile commands when the exact replacement invariant cannot be proven.
-                CommandRegistry.SetDiscovery(
-                    new DisabledRecompileDiscovery(new TypeCacheCommandDiscovery()));
+                PipelineApiBridge.SetDiscovery(
+                    new DisabledRecompileDiscovery(new CompatTypeCacheCommandDiscovery()));
 
-                int remainingProtectedCommands = CommandRegistry.DiscoverCommands()
+                int remainingProtectedCommands = PipelineApiBridge.DiscoverCommands()
                     .Count(command =>
                         command.Name == RecompileStatusCompatDiscovery.RecompileCommandName ||
                         command.Name == RecompileStatusCompatDiscovery.StatusCommandName ||
@@ -804,11 +827,11 @@ namespace Zamgune.UnityPipelineCompat
             return errors.Count == 0 ? null : string.Join("; ", errors);
         }
 
-        private sealed class DisabledRecompileDiscovery : ICommandDiscovery
+        private sealed class DisabledRecompileDiscovery : ICompatCommandDiscovery
         {
-            private readonly ICommandDiscovery _inner;
+            private readonly ICompatCommandDiscovery _inner;
 
-            internal DisabledRecompileDiscovery(ICommandDiscovery inner)
+            internal DisabledRecompileDiscovery(ICompatCommandDiscovery inner)
             {
                 _inner = inner;
             }

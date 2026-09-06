@@ -3,7 +3,6 @@ using System.IO;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using Unity.Pipeline.Commands;
-using Unity.Pipeline.Editor.Commands;
 using UnityEditor;
 using UnityEditor.Compilation;
 
@@ -18,7 +17,7 @@ namespace Zamgune.UnityPipelineCompat
     public static class RecompileCompatCommand
     {
         internal static Func<bool, object> OfficialRecompile =
-            focus => RecompileCommand.Recompile(focus);
+            focus => PipelineApiBridge.Recompile(focus);
         internal static Func<bool> IsCompiling = () => EditorApplication.isCompiling;
         internal static Action RequestCleanCompilation = () =>
             CompilationPipeline.RequestScriptCompilation(
@@ -93,7 +92,7 @@ namespace Zamgune.UnityPipelineCompat
 
         internal static void ResetTestHooks()
         {
-            OfficialRecompile = focus => RecompileCommand.Recompile(focus);
+            OfficialRecompile = focus => PipelineApiBridge.Recompile(focus);
             IsCompiling = () => EditorApplication.isCompiling;
             RequestCleanCompilation = () =>
                 CompilationPipeline.RequestScriptCompilation(

@@ -6,7 +6,6 @@ using System.Reflection;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using Unity.Pipeline.Commands;
-using Unity.Pipeline.Editor.Commands;
 
 namespace Zamgune.UnityPipelineCompat.Tests
 {
@@ -38,7 +37,7 @@ namespace Zamgune.UnityPipelineCompat.Tests
         [Test]
         public void DiscoveryTarget_PreservesOfficialRunTestsInputSchemaExactly()
         {
-            MethodInfo method = typeof(TestCommands).GetMethod(nameof(TestCommands.RunTests));
+            MethodInfo method = PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("RunTests");
             CliCommandAttribute command = method?.GetCustomAttribute<CliCommandAttribute>();
             ParameterInfo[] parameters = method?.GetParameters();
 
@@ -185,10 +184,10 @@ namespace Zamgune.UnityPipelineCompat.Tests
         [Test]
         public void Discovery_PreservesOfficialRunTestsAndReplacesOnlyOfficialTestStatus()
         {
-            MethodInfo officialRunTests = typeof(TestCommands)
-                .GetMethod(nameof(TestCommands.RunTests));
-            MethodInfo officialTestStatus = typeof(TestCommands)
-                .GetMethod(nameof(TestCommands.GetTestStatus));
+            MethodInfo officialRunTests = PipelineApiBridge.EditorType("Commands.TestCommands")
+                .GetMethod("RunTests");
+            MethodInfo officialTestStatus = PipelineApiBridge.EditorType("Commands.TestCommands")
+                .GetMethod("GetTestStatus");
             MethodInfo compatTestStatus = typeof(TestStatusCompatCommand)
                 .GetMethod(nameof(TestStatusCompatCommand.GetTestStatus));
             var discovery = CreateDiscovery();
@@ -240,7 +239,7 @@ namespace Zamgune.UnityPipelineCompat.Tests
         {
             RecompileStatusCompatDiscovery discovery = CreateSatisfiedDiscovery();
             CommandInfo officialTestStatus = CreateCommandInfo(
-                typeof(TestCommands).GetMethod(nameof(TestCommands.GetTestStatus)));
+                PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("GetTestStatus"));
 
             bool valid = RecompileStatusCompatStartupGate.TryValidateDiscoveryPostcondition(
                 discovery,
@@ -256,7 +255,7 @@ namespace Zamgune.UnityPipelineCompat.Tests
         {
             RecompileStatusCompatDiscovery discovery = CreateSatisfiedDiscovery();
             CommandInfo wrongRunTests = CreateCommandInfo(
-                typeof(TestCommands).GetMethod(nameof(TestCommands.GetTestStatus)),
+                PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("GetTestStatus"),
                 "run_tests");
 
             bool valid = RecompileStatusCompatStartupGate.TryValidateDiscoveryPostcondition(
@@ -289,7 +288,7 @@ namespace Zamgune.UnityPipelineCompat.Tests
                     typeof(RecompileStatusCompatCommand)
                         .GetMethod(nameof(RecompileStatusCompatCommand.RecompileStatus))),
                 runTestsOverride ?? CreateCommandInfo(
-                    typeof(TestCommands).GetMethod(nameof(TestCommands.RunTests))),
+                    PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("RunTests")),
                 testStatusOverride ?? CreateCommandInfo(
                     typeof(TestStatusCompatCommand)
                         .GetMethod(nameof(TestStatusCompatCommand.GetTestStatus)))
@@ -315,13 +314,13 @@ namespace Zamgune.UnityPipelineCompat.Tests
         {
             var methods = new List<MethodInfo>
             {
-                typeof(RecompileCommand).GetMethod(nameof(RecompileCommand.Recompile)),
-                typeof(RecompileCommand).GetMethod(nameof(RecompileCommand.RecompileStatus)),
+                PipelineApiBridge.EditorType("Commands.RecompileCommand").GetMethod("Recompile"),
+                PipelineApiBridge.EditorType("Commands.RecompileCommand").GetMethod("RecompileStatus"),
                 typeof(RecompileCompatCommand).GetMethod(nameof(RecompileCompatCommand.Recompile)),
                 typeof(RecompileStatusCompatCommand)
                     .GetMethod(nameof(RecompileStatusCompatCommand.RecompileStatus)),
-                typeof(TestCommands).GetMethod(nameof(TestCommands.RunTests)),
-                typeof(TestCommands).GetMethod(nameof(TestCommands.GetTestStatus))
+                PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("RunTests"),
+                PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("GetTestStatus")
             };
 
             if (includeCompatTestStatus)
@@ -332,13 +331,13 @@ namespace Zamgune.UnityPipelineCompat.Tests
 
             if (duplicateOfficialTestStatus)
             {
-                methods.Add(typeof(TestCommands).GetMethod(nameof(TestCommands.GetTestStatus)));
+                methods.Add(PipelineApiBridge.EditorType("Commands.TestCommands").GetMethod("GetTestStatus"));
             }
 
             return new RecompileStatusCompatDiscovery(new FixedDiscovery(methods.ToArray()));
         }
 
-        private sealed class FixedDiscovery : ICommandDiscovery
+        private sealed class FixedDiscovery : ICompatCommandDiscovery
         {
             private readonly MethodInfo[] _methods;
 

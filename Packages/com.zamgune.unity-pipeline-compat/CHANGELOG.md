@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased - local Pipeline 0.6 compatibility
+
+- Adapt internal startup and command registry types through a checked reflection bridge.
+- Preserve protected test/recompile commands after Pipeline 0.6 resets discovery on Play transitions.
+- Validate the bridge on Pipeline 0.5 and 0.6, including ten real Fast Enter Play Mode cycles.
+- Keep the package version and minimum Pipeline dependency unchanged for this local migration.
+
 ## [0.4.2] - 2026-08-24
 
 - Added read-only `zamgune_build_environment_status` diagnostics for Unity 6000.5 Build Profiles,

@@ -388,6 +388,7 @@ validation 시작 전:
 - `/Volumes/...` timeout은 TCC 거부로 확정할 수 없으므로 먼저 볼륨 mount/응답성을 확인한다. 그 다음 macOS `시스템 설정 > 개인정보 보호 및 보안 > 파일 및 폴더`에서 해당 Node의 이동식 볼륨 접근을 허용한다.
 - Node SHA 또는 managed runtime 경로가 바뀌면 기존 승인을 재사용한다고 가정하지 않는다. 새 경로를 승인한 뒤 `unity-mcp-router-admin doctor --timeout-sec 10`을 다시 실행한다.
 - `PROJECT_IDENTITY_MISMATCH`이면 경로가 존재한다는 이유로 승인하지 않는다. 현재 mount와 checkout이 의도한 대상인지 확인한 뒤 source config에서 installer를 다시 실행해 새 immutable identity를 만들어야 한다.
+- 등록 프로젝트가 8개를 초과하면 doctor는 최대 8개씩 나누어 전체 경로를 검사한다. timeout helper의 격리 및 전역 동시 실행 한도는 유지한다.
 - access gate 실패 전에는 Unity child나 mutation이 dispatch되지 않는다. 같은 mutation을 수동 재전송하기 전에 status에서 `UNKNOWN_OUTCOME`가 없음을 확인한다.
 - timeout을 60초 이상으로 늘리는 것은 해결책이 아니다. 3초 helper가 종료되지 않으면 broker는 helper만 `SIGKILL`하고 fail-fast한다.
 
