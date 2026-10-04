@@ -37,7 +37,7 @@ The macOS user LaunchAgent is the only broker owner. Do not start raw `unity mcp
 router, or the legacy Python bridge beside it. Direct Unity CLI commands are limited to deliberate
 offline diagnosis or rollback work and must always include the exact `--project-path`.
 
-Unity Personal is operated as `single-seat` with one Editor. Agents may edit source in different
+The Router runs in `floating` mode with up to two Editors of different projects. Agents may edit source in different
 repositories concurrently, but must never act as concurrent writers in the same repository. Every
 Unity import, recompile, test, build, Game View capture, and final Console check requires the one
 machine-wide validation turn described in
@@ -46,6 +46,8 @@ machine-wide validation turn described in
 ## Official command workflow
 
 1. In the same MCP session that will validate, call `unity_router_workspace_begin` for the project.
+   In floating mode `editorUse` is null: open the exact project with `unity open <canonical path>`
+   if needed and validate through `editor_status`. Under a single-seat config instead:
    Preserve the returned token before inspecting `editorUse`. Only a non-null operation ID that
    reaches `COMPLETED` permits validation; heartbeat the token while polling it with
    `unity_router_editor_use_status`. In `WAITING_MANUAL_CLOSE`, wait for the user to close the
