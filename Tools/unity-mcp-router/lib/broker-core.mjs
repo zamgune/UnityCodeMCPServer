@@ -7,6 +7,9 @@ import { AuthManager } from './auth-manager.mjs';
 import {
   asyncCorrelationFor,
   asyncSpecFor,
+  asyncSpecForRecovery,
+  isBuildTool,
+  isRecompileTool,
   isSuccessfulRecompileCompletion,
   responseIsTerminal,
   responseMatchesAsyncCorrelation,
@@ -1284,7 +1287,7 @@ export class BrokerCore {
           });
         }
         const timeoutMs = Math.min(this.config.toolTimeoutSec * 1000, Math.max(1, remainingMs()));
-        if (operation.toolName === 'recompile' && operation.recompileListChangedEpochAtDispatch == null) {
+        if (isRecompileTool(operation.toolName) && operation.recompileListChangedEpochAtDispatch == null) {
           operation.recompileListChangedEpochAtDispatch = this.#childToolListChangedEpoch(project.key);
           this.recompileListChangedGenerations.set(project.key, {
             operationId: operation.operationId,
@@ -1386,7 +1389,7 @@ export class BrokerCore {
           const asyncSpec = asyncSpecFor(operation.toolName, args);
           if (responseStartsAsync(asyncSpec, response)) {
             const correlation = asyncCorrelationFor(asyncSpec, response);
-            if (asyncSpec.triggerTool === 'build' && !correlation) {
+            if (isBuildTool(asyncSpec.triggerTool) && !correlation) {
               await child.stop();
               await this.journal.markUnknownOutcome(operation.operationId);
               operation.state = 'UNKNOWN_OUTCOME';
@@ -1418,7 +1421,7 @@ export class BrokerCore {
               structuredExtra: { statusTool: asyncSpec.statusTool },
             });
           }
-          if (operation.toolName === 'recompile') {
+          if (isRecompileTool(operation.toolName)) {
             this.#announceSuccessfulRecompile(
               project,
               response,
@@ -1491,7 +1494,7 @@ export class BrokerCore {
       throw error;
     } finally {
       if (
-        operation.toolName === 'recompile'
+        isRecompileTool(operation.toolName)
         && ['UNKNOWN_OUTCOME', 'CANCELLED'].includes(operation.state)
         && this.recompileListChangedGenerations.get(project.key)?.operationId === operation.operationId
       ) {
@@ -3190,10 +3193,7 @@ export class BrokerCore {
 
   #restoreAsyncTracker(journalOperation) {
     const project = this.#projectForJournalOperation(journalOperation);
-    const spec = asyncSpecFor(
-      journalOperation.method,
-      journalOperation.method === 'run_tests' ? { async_tests: true } : {},
-    );
+    const spec = asyncSpecForRecovery(journalOperation.method);
     if (!project || !spec) {
       this.#addRecoveryFault(
         journalOperation,
@@ -3209,7 +3209,7 @@ export class BrokerCore {
       });
       return;
     }
-    if (spec.triggerTool === 'build' && !journalOperation.correlation?.buildId) {
+    if (isBuildTool(spec.triggerTool) && !journalOperation.correlation?.buildId) {
       this.#addRecoveryFault(journalOperation, 'ASYNC_CORRELATION_MISSING', project);
       return;
     }
@@ -3224,7 +3224,7 @@ export class BrokerCore {
       }
       leases.push(lease);
     }
-    if (spec.triggerTool === 'recompile') {
+    if (isRecompileTool(spec.triggerTool)) {
       this.recompileListChangedGenerations.set(project.key, {
         operationId: journalOperation.operationId,
         announced: false,
@@ -3387,7 +3387,7 @@ export class BrokerCore {
     if (this.asyncByProject.get(tracker.project.key) !== tracker) return;
     if (terminalResponse && !tracker.recompileTerminalEvaluated) {
       tracker.recompileTerminalEvaluated = true;
-      if (tracker.triggerTool === 'recompile') {
+      if (isRecompileTool(tracker.triggerTool)) {
         this.#announceSuccessfulRecompile(
           tracker.project,
           terminalResponse,

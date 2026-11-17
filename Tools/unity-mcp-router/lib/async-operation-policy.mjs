@@ -1,10 +1,22 @@
+const BUILD = Object.freeze({ statusTool: 'build_status', active: ['queued', 'building'], terminal: ['completed', 'failed', 'cancelled', 'error'], exclusive: true });
+const SWITCH = Object.freeze({ active: ['switching'], terminal: ['completed', 'failed', 'error'], exclusive: true });
+const RECOMPILE = Object.freeze({ active: ['triggered', 'compiling'], terminal: ['completed', 'up_to_date', 'failed', 'error'] });
+const TEST = Object.freeze({ statusTool: 'test_status', active: ['running', 'in_progress'], terminal: ['completed', 'cancelled', 'failed', 'error', 'no_tests'] });
+const PACKAGE = Object.freeze({ statusTool: 'package_status', active: ['in_progress'], terminal: ['completed', 'failed', 'error'], when: (args) => args.wait !== true && args.dry_run !== true && args['dry-run'] !== true });
+
+// Exact wire names, not a request-rewriting layer. Keep the pre-0.9 names for
+// older projects and durable journals; Pipeline 1.0 only advertises grouped names.
 const SPECS = Object.freeze({
-  build: Object.freeze({ statusTool: 'build_status', active: ['queued', 'building'], terminal: ['completed', 'failed', 'cancelled', 'error'], exclusive: true }),
-  switch_build_target: Object.freeze({ statusTool: 'switch_build_target_status', active: ['switching'], terminal: ['completed', 'failed', 'error'], exclusive: true }),
-  recompile: Object.freeze({ statusTool: 'recompile_status', active: ['triggered', 'compiling'], terminal: ['completed', 'up_to_date', 'failed', 'error'] }),
-  run_tests: Object.freeze({ statusTool: 'test_status', active: ['running', 'in_progress'], terminal: ['completed', 'cancelled', 'failed', 'error', 'no_tests'], when: (args) => args.async_tests === true, allowedMutations: ['cancel_tests'] }),
-  package_add: Object.freeze({ statusTool: 'package_status', active: ['in_progress'], terminal: ['completed', 'failed', 'error'], when: (args) => args.wait !== true && args.dry_run !== true }),
-  package_remove: Object.freeze({ statusTool: 'package_status', active: ['in_progress'], terminal: ['completed', 'failed', 'error'], when: (args) => args.wait !== true && args.dry_run !== true }),
+  build: BUILD,
+  build_run: BUILD,
+  switch_build_target: Object.freeze({ ...SWITCH, statusTool: 'switch_build_target_status' }),
+  build_target_switch: Object.freeze({ ...SWITCH, statusTool: 'build_target_switch_status' }),
+  recompile: Object.freeze({ ...RECOMPILE, statusTool: 'recompile_status' }),
+  script_recompile: Object.freeze({ ...RECOMPILE, statusTool: 'script_recompile_status' }),
+  run_tests: Object.freeze({ ...TEST, when: (args) => args.async_tests === true, allowedMutations: ['cancel_tests'] }),
+  test_run: Object.freeze({ ...TEST, when: (args) => args['async-tests'] === true, allowedMutations: ['test_cancel'] }),
+  package_add: PACKAGE,
+  package_remove: PACKAGE,
   package_resolve: Object.freeze({ statusTool: 'package_status', active: ['in_progress', 'queued'], terminal: ['completed', 'failed', 'error'], assumeActiveOnSuccess: true }),
 });
 
@@ -97,7 +109,7 @@ export function responseStatuses(response) {
 }
 
 export function asyncSpecFor(toolName, args = {}) {
-  const spec = SPECS[toolName];
+  const spec = Object.hasOwn(SPECS, toolName) ? SPECS[toolName] : null;
   if (!spec || (spec.when && !spec.when(args))) return null;
   return Object.freeze({
     triggerTool: toolName,
@@ -108,6 +120,22 @@ export function asyncSpecFor(toolName, args = {}) {
     assumeActiveOnSuccess: spec.assumeActiveOnSuccess === true,
     allowedMutations: Object.freeze([...(spec.allowedMutations ?? [])]),
   });
+}
+
+export function isRecompileTool(toolName) {
+  return toolName === 'recompile' || toolName === 'script_recompile';
+}
+
+export function isBuildTool(toolName) {
+  return toolName === 'build' || toolName === 'build_run';
+}
+
+// RUNNING journal entries already prove an async dispatch. Arguments are not
+// persisted, so reconstruct only the known trigger's own async flag.
+export function asyncSpecForRecovery(toolName) {
+  return asyncSpecFor(toolName, toolName === 'test_run'
+    ? { 'async-tests': true }
+    : toolName === 'run_tests' ? { async_tests: true } : {});
 }
 
 export function responseStartsAsync(spec, response) {
@@ -139,7 +167,7 @@ export function isSuccessfulRecompileCompletion(response) {
 }
 
 export function asyncCorrelationFor(spec, response) {
-  if (spec?.triggerTool !== 'build') return null;
+  if (!isBuildTool(spec?.triggerTool)) return null;
   const buildIds = new Set();
   collectNamedStrings(response, 'buildId', buildIds);
   const buildId = [...buildIds][0];
@@ -158,7 +186,7 @@ export function responseMatchesAsyncCorrelation(correlation, response) {
 
 export function asyncSpecByStatusTool(statusTool) {
   for (const [triggerTool] of Object.entries(SPECS)) {
-    const spec = asyncSpecFor(triggerTool, triggerTool === 'run_tests' ? { async_tests: true } : {});
+    const spec = asyncSpecForRecovery(triggerTool);
     if (spec?.statusTool === statusTool) return spec;
   }
   return null;

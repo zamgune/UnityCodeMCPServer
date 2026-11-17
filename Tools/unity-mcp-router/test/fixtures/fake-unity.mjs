@@ -4,6 +4,15 @@ import path from 'node:path';
 import process from 'node:process';
 
 const argv = process.argv.slice(2);
+const grouped = process.env.FAKE_UNITY_GROUPED === '1';
+const groupedNames = {
+  get_console_logs: 'console_get',
+  build: 'build_run',
+  recompile: 'script_recompile',
+  recompile_status: 'script_recompile_status',
+  run_tests: 'test_run',
+  cancel_tests: 'test_cancel',
+};
 const stateFile = process.env.FAKE_UNITY_STATE_FILE;
 const record = (kind, data = {}) => {
   if (!stateFile) return;
@@ -140,6 +149,17 @@ const tools = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
+
+if (grouped) {
+  for (const tool of tools) {
+    tool.name = groupedNames[tool.name] ?? tool.name;
+    const properties = tool.inputSchema.properties;
+    if (properties.async_tests) {
+      properties['async-tests'] = properties.async_tests;
+      delete properties.async_tests;
+    }
+  }
+}
 
 let buffer = '';
 let active = null;
@@ -311,9 +331,16 @@ async function handle(message) {
     return;
   }
 
-  const name = message.params?.name;
+  const wireName = message.params?.name;
+  const name = grouped
+    ? Object.entries(groupedNames).find(([, modern]) => modern === wireName)?.[0] ?? wireName
+    : wireName;
   const args = message.params?.arguments ?? {};
-  record('call-start', { id: message.id, name, projectPath, marker: args.marker });
+  record('call-start', { id: message.id, name, wireName, projectPath, marker: args.marker, arguments: args });
+  if (grouped && Object.hasOwn(groupedNames, wireName)) {
+    result(message.id, { isError: true, content: [{ type: 'text', text: 'Legacy tool removed' }] });
+    return;
+  }
   if (args.malformedFrame) {
     process.stdout.write('{not-json}\n');
     return;
